@@ -62,8 +62,14 @@ target_link_libraries(sequitur_core
         Threads::Threads
 )
 
-# Modern target-based include specification
-target_include_directories(sequitur_core PUBLIC include)
+# Target-based include specification (Expose internal API headers and hardware pkg paths)
+target_include_directories(sequitur_core 
+    PUBLIC 
+        include
+        ${URING_INCLUDE_DIRS}
+    PRIVATE
+        ${gtest_SOURCE_DIR}/include
+)
 
 # -----------------------------------------------------------------------------
 # 4. The Executable (The Application)
@@ -72,10 +78,8 @@ add_executable(sequitur_engine src/main.cpp)
 target_link_libraries(sequitur_engine PRIVATE sequitur_core)
 
 # -----------------------------------------------------------------------------
-# 5. Testing & Benchmarking
+# 5. Testing & Benchmarking (Direct Executables)
 # -----------------------------------------------------------------------------
-enable_testing()
-
 # Unit Tests
 file(GLOB_RECURSE UNIT_TEST_SOURCES "tests/unit/*.cpp")
 add_executable(unit_tests ${UNIT_TEST_SOURCES})

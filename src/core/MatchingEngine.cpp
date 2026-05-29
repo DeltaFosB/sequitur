@@ -11,8 +11,17 @@ void MatchingEngine::submit_order(uint8_t side, uint64_t price,
   __builtin_ia32_lfence();
   uint64_t start_cycles = __rdtsc();
 
-  total_orders++;
   Order *order = pool.acquire();
+
+  if (order == nullptr) [[unlikely]] {
+    if (metrics_worker_) [[likely]] {
+      metrics_worker_->record_backpressure();
+    }
+    return; // Drop the order safely and exit before hitting a Segfault
+  }
+
+  total_orders++;
+
   order->side = side;
   order->price = price;
   order->quantity = quantity;

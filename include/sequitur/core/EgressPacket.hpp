@@ -24,7 +24,7 @@ struct alignas(64) EgressPacket {
   uint64_t client_order_id; // 8 Bytes (The aggressive or resting order's
                             // identity key)
   uint64_t maker_id;        // 8 Bytes (Populated if type == ORDER_FILLED)
-  uint64_t Skinner_id;      // 8 Bytes (Populated if type == ORDER_FILLED)
+  uint64_t taker_id;        // 8 Bytes (Populated if type == ORDER_FILLED)
 
   // Execution Quantities and Pricing
   uint64_t match_price; // 8 Bytes (The exact price level the trade cleared at)
