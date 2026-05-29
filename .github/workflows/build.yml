@@ -26,8 +26,25 @@ jobs:
 
       - name: "Execute Automated Tests"
         run: |
-          ./build/unit_tests
-          ./build/integration_tests
-          ./build/benchmarks
-      
+          echo "### Dynamic Test Suite Execution Summary" >> $GITHUB_STEP_SUMMARY
+          
+          # 1. Run Unit Tests and export metrics to JSON
+          ./build/unit_tests --gtest_output=json:build/unit_results.json --gtest_brief=1
+          UNIT_PASSED=$(jq '.tests - .failures' build/unit_results.json)
+          UNIT_TOTAL=$(jq '.tests' build/unit_results.json)
+          echo "- **Unit Tests:** Passed ${UNIT_PASSED}/${UNIT_TOTAL} structural invariants." >> $GITHUB_STEP_SUMMARY
+          
+          # 2. Run Integration Tests and export metrics to JSON
+          ./build/integration_tests --gtest_output=json:build/int_results.json --gtest_brief=1
+          INT_PASSED=$(jq '.tests - .failures' build/int_results.json)
+          INT_TOTAL=$(jq '.tests' build/int_results.json)
+          echo "- **Integration Tests:** Passed ${INT_PASSED}/${INT_TOTAL} pipeline flows." >> $GITHUB_STEP_SUMMARY
 
+      - name: "Execute Performance Benchmarks"
+        run: |
+          echo "### Hot-Path Performance Benchmarks" >> $GITHUB_STEP_SUMMARY
+          
+          # Append the raw text output of your benchmark track directly into the markdown summary
+          echo "\`\`\`text" >> $GITHUB_STEP_SUMMARY
+          ./build/benchmarks >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
