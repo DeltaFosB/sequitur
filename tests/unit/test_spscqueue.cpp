@@ -70,9 +70,11 @@ TEST(SPSCQueueTest, OneToOneProducerConsumerStreaming) {
         producer_ready.store(true, std::memory_order_release);
 
         // Block until the main thread drops the gate to isolate execution
-        // timings
-        while (!start_signal.load(std::memory_order_acquire))
-          ;
+        // timings. yield() ensures the core is released on resource-constrained
+        // cloud environments.
+        while (!start_signal.load(std::memory_order_acquire)) {
+          std::this_thread::yield();
+        }
 
         for (size_t i = 0; i < total_packets; ++i) {
           core::EgressPacket p{};
@@ -87,14 +89,16 @@ TEST(SPSCQueueTest, OneToOneProducerConsumerStreaming) {
 
           // Step over backpressure states linearly if the consumer core falls
           // out of cache
-          while (!queue.push(p))
-            ;
+          while (!queue.push(p)) {
+            std::this_thread::yield();
+          }
         }
       });
 
   // Wait for the background thread to spin up completely
-  while (!producer_ready.load(std::memory_order_relaxed))
-    ;
+  while (!producer_ready.load(std::memory_order_relaxed)) {
+    std::this_thread::yield();
+  }
 
   // Open the barrier!
   start_signal.store(true, std::memory_order_release);
@@ -114,6 +118,8 @@ TEST(SPSCQueueTest, OneToOneProducerConsumerStreaming) {
       empty_spins = 0; // Reset tracking on successful hit
     } else {
       empty_spins++;
+      std::this_thread::yield(); // Let the producer thread work if the queue
+                                 // runs completely empty
     }
   }
 

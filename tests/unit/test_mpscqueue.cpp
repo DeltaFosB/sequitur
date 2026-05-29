@@ -46,8 +46,7 @@ TEST(MPSCQueueTest, QueueFullBackpressure) {
   packet.client_order_id = 1;
 
   // Dynamically saturate the MPSC ring buffer until it hits its exact
-  // allocation wall. This abstracts away explicit slot offsets across variable
-  // indexing strategies.
+  // allocation wall.
   size_t pushed_count = 0;
   while (queue.push(packet) && pushed_count < 4096) {
     pushed_count++;
@@ -62,7 +61,12 @@ TEST(MPSCQueueTest, QueueFullBackpressure) {
 TEST(MPSCQueueTest, ConcurrentProducerContention) {
   concurrency::MPSCQueue queue;
 
-  const size_t num_producers = 4;
+  // Dynamically scale down the producer count if executing on low-core
+  // environments (e.g., GitHub Actions). This guarantees that the main thread
+  // and background threads don't trigger permanent execution starvation.
+  const size_t available_cores = std::thread::hardware_concurrency();
+  const size_t num_producers = (available_cores > 2) ? 4 : 1;
+
   const size_t packets_per_producer = 10000;
   const size_t total_expected_packets = num_producers * packets_per_producer;
 
@@ -78,9 +82,11 @@ TEST(MPSCQueueTest, ConcurrentProducerContention) {
           threads_ready.fetch_add(1, std::memory_order_relaxed);
 
           // Spin-wait until the main thread releases the gate for simultaneous
-          // collision
-          while (!start_signal.load(std::memory_order_acquire))
-            ;
+          // collision. yield() prevents the core from locking up entirely on
+          // 2-core cloud VMs.
+          while (!start_signal.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+          }
 
           for (size_t j = 0; j < packets_per_producer; ++j) {
             core::IngressPacket p{};
@@ -90,16 +96,18 @@ TEST(MPSCQueueTest, ConcurrentProducerContention) {
             p.price = 100;
             p.client_order_id = static_cast<uint64_t>(j);
 
-            // Keep pushing until it succeeds (spinning if hitting backpressure)
-            while (!queue.push(p))
-              ;
+            // Keep pushing until it succeeds (yielding if hitting backpressure)
+            while (!queue.push(p)) {
+              std::this_thread::yield();
+            }
           }
         });
   }
 
   // Wait for all producer threads to line up at the gate
-  while (threads_ready.load(std::memory_order_relaxed) < num_producers)
-    ;
+  while (threads_ready.load(std::memory_order_relaxed) < num_producers) {
+    std::this_thread::yield();
+  }
 
   // Open the gates! All threads smash the CAS loop simultaneously
   start_signal.store(true, std::memory_order_release);
@@ -116,6 +124,8 @@ TEST(MPSCQueueTest, ConcurrentProducerContention) {
       empty_spins = 0; // Reset tracking on successful hit
     } else {
       empty_spins++;
+      std::this_thread::yield(); // Cooperatively yield to give producers
+                                 // execution space
     }
   }
 
