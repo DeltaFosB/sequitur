@@ -62,6 +62,19 @@ public:
       free_indices[++top] = idx;
     }
   }
+  size_t get_used_count() const {
+    return used_count.load(std::memory_order_relaxed);
+  }
+
+  size_t get_alloc_failures() const {
+    return alloc_failures.load(std::memory_order_relaxed);
+  }
+
+  size_t get_peak_usage() const {
+    return peak_usage.load(std::memory_order_relaxed);
+  }
+
+  size_t get_capacity() const { return capacity; }
 
   ~ObjectPool() {
     std::free(pool);

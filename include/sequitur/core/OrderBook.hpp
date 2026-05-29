@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <sequitur/core/Order.hpp>
 #include <sequitur/core/Trade.hpp>
@@ -19,7 +20,8 @@ struct PriceLevel {
 };
 class OrderBook {
 private:
-  uint64_t total_trades = 0, total_volume = 0;
+  std::atomic<uint64_t> total_trades{0};
+  std::atomic<uint64_t> total_volume{0};
 
 public:
   PriceLevel book[MAX_PRICE_TICKS + 1];
@@ -84,8 +86,8 @@ public:
         uint32_t trade_quantity =
             std::min(incoming->quantity, resting->quantity);
 
-        total_trades++;
-        total_volume += trade_quantity;
+        total_trades.fetch_add(1, std::memory_order_relaxed);
+        total_volume.fetch_add(trade_quantity, std::memory_order_relaxed);
         exec_q.push(
             {resting->id, incoming->id, resting->price, trade_quantity});
 
@@ -111,8 +113,8 @@ public:
         uint32_t trade_quantity =
             std::min(incoming->quantity, resting->quantity);
 
-        total_trades++;
-        total_volume += trade_quantity;
+        total_trades.fetch_add(1, std::memory_order_relaxed);
+        total_volume.fetch_add(trade_quantity, std::memory_order_relaxed);
         exec_q.push(
             {resting->id, incoming->id, resting->price, trade_quantity});
 
@@ -131,9 +133,12 @@ public:
       insert_order(incoming);
     }
   }
-
-  uint64_t get_total_trades() const { return total_trades; }
-  uint64_t get_total_volume() const { return total_volume; }
+  uint64_t get_total_trades() const {
+    return total_trades.load(std::memory_order_relaxed);
+  }
+  uint64_t get_total_volume() const {
+    return total_volume.load(std::memory_order_relaxed);
+  }
 };
 } // namespace core
 } // namespace sequitur

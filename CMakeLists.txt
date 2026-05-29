@@ -23,7 +23,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         -Werror             # Treat warnings as errors
         -Wpedantic
         -fno-rtti           # Disable Runtime Type Info (Performance)
-        -fno-exceptions     # Disable Exceptions (Performance - Optional)
+        -fno-exceptions     # Disable Exceptions (Performance)
     )
 endif()
 
@@ -32,30 +32,38 @@ endif()
 # -----------------------------------------------------------------------------
 include(FetchContent)
 
+# Find System Thread Support (Required for MetricsWorker background thread)
+find_package(Threads REQUIRED)
+
 # Google Test (Unit Testing)
 FetchContent_Declare(
   googletest
   URL https://github.com/google/googletest/archive/refs/heads/main.zip
 )
-# Make them available
 FetchContent_MakeAvailable(googletest)
 
 # liburing (Linux Async I/O for Gateway)
-# Ensure you have 'liburing-dev' installed on your system
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(URING REQUIRED liburing)
 
 # -----------------------------------------------------------------------------
 # 3. The Core Library (The Engine)
 # -----------------------------------------------------------------------------
-include_directories(include)
-
 # Gather all sources (excluding main.cpp)
 file(GLOB_RECURSE SOURCES "src/**/*.cpp")
 list(FILTER SOURCES EXCLUDE REGEX "src/main.cpp")
 
 add_library(sequitur_core ${SOURCES})
-target_link_libraries(sequitur_core PUBLIC ${URING_LIBRARIES})
+
+# Explicitly link system threads and liburing to the core engine
+target_link_libraries(sequitur_core 
+    PUBLIC 
+        ${URING_LIBRARIES}
+        Threads::Threads
+)
+
+# Modern target-based include specification
+target_include_directories(sequitur_core PUBLIC include)
 
 # -----------------------------------------------------------------------------
 # 4. The Executable (The Application)
@@ -74,11 +82,9 @@ add_executable(unit_tests ${UNIT_TEST_SOURCES})
 target_link_libraries(unit_tests PRIVATE sequitur_core gtest_main)
 
 # Integration Tests
-# Unit Tests
 file(GLOB_RECURSE INTEGRATION_TEST_SOURCES "tests/integration/*.cpp")
 add_executable(integration_tests ${INTEGRATION_TEST_SOURCES})
 target_link_libraries(integration_tests PRIVATE sequitur_core gtest_main)
-
 
 # Latency Benchmarks
 add_executable(benchmarks tests/benchmarks/bench_pure_latency.cpp)
