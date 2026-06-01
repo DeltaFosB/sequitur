@@ -3,33 +3,45 @@
 #include <chrono>
 #include <cstdint>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <x86intrin.h> // Provides access to ultra-fast hardware __rdtscp intrinsic
+#endif
+
 namespace sequitur {
 namespace utils {
+
 class Timer {
 private:
 #ifdef ENABLE_TELEMETRY
-  std::chrono::time_point<std::chrono::high_resolution_clock> start_time;
-  uint64_t *bfr, *idx;
-
+  uint64_t start_cycles;
+  uint64_t *bfr;
+  uint64_t *idx;
 #endif
+
 public:
-  Timer([[maybe_unused]] uint64_t *buffer, [[maybe_unused]] uint64_t *index) {
+  inline Timer([[maybe_unused]] uint64_t *buffer,
+               [[maybe_unused]] uint64_t *index) noexcept {
 #ifdef ENABLE_TELEMETRY
-    start_time = std::chrono::high_resolution_clock::now();
     bfr = buffer;
     idx = index;
+
+    // Direct hardware instruction call (Takes only ~10-15 cycles total)
+    unsigned int aux;
+    start_cycles = __rdtscp(&aux);
 #endif
   }
-  ~Timer() {
+
+  inline ~Timer() noexcept {
 #ifdef ENABLE_TELEMETRY
-    auto end_time = std::chrono::high_resolution_clock::now();
+    unsigned int aux;
+    uint64_t end_cycles = __rdtscp(&aux);
 
-    auto interval = std::chrono::duration_cast<std::chrono::nanoseconds>(
-        end_time - start_time);
-
-    bfr[(*idx)++] = interval.count();
+    // Record the RAW CPU cycles directly into the buffer array.
+    // Zero nanosecond math conversions inside the hot execution window.
+    bfr[(*idx)++] = (end_cycles - start_cycles);
 #endif
   }
 };
+
 } // namespace utils
 } // namespace sequitur

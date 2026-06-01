@@ -90,7 +90,21 @@ file(GLOB_RECURSE INTEGRATION_TEST_SOURCES "tests/integration/*.cpp")
 add_executable(integration_tests ${INTEGRATION_TEST_SOURCES})
 target_link_libraries(integration_tests PRIVATE sequitur_core gtest_main)
 
-# Latency Benchmarks
-add_executable(benchmarks tests/benchmarks/bench_pure_latency.cpp)
+# Latency Benchmarks (Exempted Standalone Target)
+# Bypasses the core static library boundary to compile matching source files directly
+add_executable(benchmarks 
+    tests/benchmarks/bench_pure_latency.cpp
+    src/core/MatchingEngine.cpp
+)
+
+# Target-based include path specification for the standalone benchmark executable
+target_include_directories(benchmarks 
+    PRIVATE 
+        include
+        ${URING_INCLUDE_DIRS}
+)
+
 target_compile_definitions(benchmarks PRIVATE ENABLE_TELEMETRY)
-target_link_libraries(benchmarks PRIVATE sequitur_core)
+
+# Link ONLY liburing directly to the benchmark target, completely ignoring Threads::Threads
+target_link_libraries(benchmarks PRIVATE ${URING_LIBRARIES})

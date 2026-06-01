@@ -9,11 +9,8 @@ namespace utils {
 MetricsWorker::MetricsWorker(const core::MatchingEngine &engine)
     : engine_(engine), active_(true),
       worker_thread_(&MetricsWorker::logging_loop, this) {
-
-  // Self-Registration: Temporarily strip constness from the engine reference
-  // to bind this worker instance's memory address ('this') to the hot path
-  // pointer.
-  const_cast<core::MatchingEngine &>(engine_).register_metrics_worker(this);
+  // The C++ Core is now completely telemetry-agnostic.
+  // Self-registration has been stripped to protect matching core purity.
 }
 
 MetricsWorker::~MetricsWorker() {
@@ -35,6 +32,18 @@ void MetricsWorker::logging_loop() {
     size_t pool_used = engine_.get_pool_used();
     size_t pool_failures = engine_.get_pool_failures();
     size_t pool_peak = engine_.get_pool_peak();
+    size_t pool_capacity = engine_.get_pool_capacity();
+
+    // ---------------------------------------------------------------------
+    // Dynamic Backpressure Calculation
+    // ---------------------------------------------------------------------
+    // If memory pool exhaustion has caused allocations to fail or utilization
+    // spikes past a critical 95% threshold, log it as an active backpressure
+    // event.
+    if (pool_failures > 0 ||
+        pool_used >= static_cast<size_t>(pool_capacity * 0.95)) {
+      record_backpressure();
+    }
 
     // Calculate dynamic volume and efficiency metrics
     uint64_t delta_orders = current_orders - last_orders;
