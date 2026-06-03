@@ -1,6 +1,6 @@
 # Sequitur HFT Matching Engine
 
-Sequitur is a deterministic, ultra-low latency C++ matching engine designed for high-frequency algorithmic trading (HFT). Built with strict hardware sympathy, the project investigates the limits of single-threaded deterministic execution, lock-free concurrency, and zero-allocation memory management to achieve sub-microsecond "Tick-to-Trade" latencies.
+Sequitur is a deterministic, ultra-low latency C++ matching engine designed for high-frequency algorithmic trading (HFT). Built with strict hardware sympathy, the project investigates the limits of single-threaded deterministic execution, lock-free concurrency, zero-allocation memory management, and decoupled real-time observability to achieve sub-microsecond "Tick-to-Trade" latencies.
 
 The architecture isolates a pure Price-Time Priority limit order book inside a dedicated, single-threaded execution core, completely removing the overhead of operating system synchronization, context switches, and core-to-core memory contention during high-throughput market events.
 
@@ -30,7 +30,7 @@ The table below documents the empirical evolution of Sequitur's architectural pe
 
 | Telemetry Phase / Layout | Mean Round-Trip | P99 Tail Latency | Tracking Footprint | Hardware Jitter ($\sigma$) | Micro-Architectural Trade-off & Observation |
 | --- | --- | --- | --- | --- | --- |
-| **Decoupled SPSC Pipeline** | **15.71 ns** | **18.20 ns** | **64 Bytes / Packet** | **1.00 ns** | **Production Baseline.** Telemetry is deferred out-of-band via an lock-free SPSC queue. CPU pipeline lookahead is maximized. |
+| **Decoupled SPSC Pipeline** | **15.71 ns** | **18.20 ns** | **64 Bytes / Packet** | **1.00 ns** | **Production Baseline.** Telemetry is deferred out-of-band via a lock-free SPSC queue. CPU pipeline lookahead is maximized. |
 | **Macro-Bucket Partitioning** | 23.53 ns | 25.60 ns | 8 KB | 1.51 ns | Monolithic baseline with out-of-band macro-timing. Opens compiler loop vectorization options. |
 | **Atomic-Bound OrderBook** | 32.46 ns | 36.44 ns | 8 KB | 7.82 ns | Implements relaxed atomics inside the hot path. Forces hardware instruction taxes via Read-Modify-Write (RMW) cycle pipeline bubbles. |
 | **Individual Vector Tracking** | 39.95 ns | 62.41 ns | 8 MB | 3.44 ns | Suffers severe data cache thrashing. The massive 8MB telemetry array continuously evicts active order book nodes to RAM. |
@@ -73,9 +73,12 @@ graph TD
         Book -->|Double-Linked Update| Matrix[Array Price Matrix]
     end
     
-    subgraph "Asynchronous Telemetry (Decoupled Core 4)"
+    subgraph "Asynchronous Telemetry Pipeline"
         Engine -->|Push Telemetry Packet| MetricsQueue{SPSC Metrics Queue}
         MetricsQueue -.->|Zero-Copy Pop Reference| MetricsWorker[Metrics Worker Thread]
+        MetricsWorker -->|Structured JSON via RAM Disk| Vector[Vector Telemetry Agent]
+        Vector -->|Real-Time Non-Blocking Ingress| Loki[Grafana Loki Container]
+        Loki -->|Dynamic Multi-Percentile Plot| Grafana[Live Grafana UI]
     end
     
     subgraph "Hardware Target"
@@ -98,12 +101,13 @@ To protect the ultra-low latency execution path, the `MatchingEngine` and `Order
 * **Mechanism:** Core metrics like `total_trades` and `total_volume` utilize plain integer types. No mutexes, memory fences, or `std::atomic` variables exist within the matching loop structures.
 * **Benefit:** Bypasses all multi-threaded cache-line ownership fights. A single physical CPU core entirely owns the memory pool and double-linked list allocations, preventing instruction-level pipeline serialization stalls.
 
-### 3. Telemetry: Decoupled Out-of-Band Metrics Engine
+### 3. Telemetry: Decoupled Out-of-Band Real-Time Metrics Pipeline
 
-Observability is split into an independent execution context using an asynchronous consumer-producer topology to eliminate measurement distortion from the hot path.
+Observability is entirely decoupled from the execution path using an asynchronous, non-blocking pipeline to extract real-time metrics without injecting measurement distortion or cache pollution into the engine.
 
-* **Mechanism:** The matching core constructs a stack-allocated 64-byte `MetricsPacket` tracking engine states and raw cycle durations measured via assembly `rdtsc`. This packet is pushed out-of-band via a lock-free `SPSCQueue` using absolute distance index calculations. A decoupled background `MetricsWorker` thread consumes the queue on a separate CPU core, serializing real-time analytical JSON structures to `stdout`.
-* **Benefit:** Erases the stopwatch tracking tax from the inner matching path, allowing for real-time telemetry extraction without injecting atomic write-stalls or cache invalidations into the execution stream.
+* **Engine Layer:** The matching core constructs a stack-allocated 64-byte `MetricsPacket` tracking engine states and raw cycle durations measured via assembly `rdtsc`. This packet is pushed out-of-band via a lock-free `SPSCQueue` using absolute distance index calculations, keeping the active telemetry tax at a flat **0.00 ns** on the trading thread.
+* **Ingress Layer:** A background `MetricsWorker` thread consumes the queue on an independent core, flattening the structures into a structured JSON entry string, streaming them directly into `/dev/shm/sequitur/telemetry.log` (a Linux memory-resident RAM disk) to guarantee zero physical disk I/O blocking.
+* **Aggregation & Visualization Layer:** A local `Vector` data agent leverages `inotify` watches to stream the appended JSON lines instantly into a `Grafana Loki` instance. Invalid non-JSON startup/shutdown lines are intercepted and dropped at the Vector VRL remapping tier to ensure deterministic parsing. `Grafana` consumes the Loki data source to render sub-microsecond latency distributions (P50, P99, P99.9), memory allocation bounds, and throughput timelines live in production.
 
 ---
 
@@ -113,7 +117,8 @@ Observability is split into an independent execution context using an asynchrono
 
 * **Compiler:** Toolchain fully compliant with C++20 (GCC 10+ or Clang 11+)
 * **Build System:** CMake 3.20 or higher
-* **Operating System:** Linux environment with `sudo` access (mandatory for real-time scheduling priority adjustments and CPU core binding)
+* **Containerization:** Docker & Docker Compose (for Grafana/Loki stack provisioning)
+* **Operating System:** Linux environment with `sudo` access (mandatory for real-time scheduling priority adjustments and CPU core binding via `chrt` and `taskset`)
 
 ### Compilation
 
@@ -127,23 +132,28 @@ cmake --build . --target unit_tests
 
 ```
 
-### Running the Benchmark (Automated Real-Time Suite)
+### Complete Telemetry Pipeline Orchestration
 
-To permanently stabilize your benchmarks and eliminate OS kernel context switching, background timer interrupts, and core migration cache-flushes, use the automated bash execution framework (`run_bench.sh`) sitting at the project root:
+The entire infrastructure stack—including Docker containers, log clearouts, Vector data stream states, and the performance-isolated simulation engine loop—is fully automated via a single root orchestrator script.
+
+To launch the unified pipeline, execute the following command from the project root:
 
 ```bash
-# Execute the automated real-time benchmarking pipeline from the project root
-sudo ./run_bench.sh
+sudo ./run_pipeline.sh
 
 ```
 
-#### Under the Hood:
+#### Under the Hood Lifecycle:
 
-The validation script automatically runs 10 consecutive benchmark iterations under strict hardware isolation constraints:
+The orchestration script manages the system state sequentially to ensure no race conditions occur during system initialization:
 
-1. **`taskset -c 3`**: Pins the benchmark process exclusively to physical CPU Core 3, locking the matching structures hot in the core's local L1/L2 caches.
-2. **`chrt -f 99`**: Confirms maximum real-time **SCHED_FIFO** scheduling priority, blocking the Linux kernel scheduler from interrupting the thread.
-3. **Statistical Aggregation**: Strips the terminal output text, parses the unpolluted raw nanosecond and throughput metrics via `awk`, and computes the true mathematical mean average latency, mean P99 tail distribution, mean peak throughput, and standard deviations (hardware jitter).
+1. **Privilege Validation:** Asserts the shell session contains root execution access, preventing failure when requesting scheduling overrides.
+2. **RAM Disk Allocation:** Pre-allocates and clears out the memory-backed file descriptor path inside `/dev/shm/sequitur/` to establish zero-I/O streaming bounds.
+3. **Container Infrastructure Initialization:** Launches the underlying `Loki` and `Grafana` container virtualization layer in detached mode (`-d`).
+4. **Telemetry Agent Reset:** Kills any orphaned logging agents, purges the local checkpoint cache tracking directory (`.vector_data/`), and spawns the `Vector` logging service attached to the local `vector.toml` layout guidelines.
+5. **Hyper-Thread Isolated Loop Execution:** Pins the compiled executable context to **Physical CPU Core 3** via `taskset -c 3` and updates the process scheduling model to the maximum Linux Real-Time FIFO priority (`chrt -f 99`). This locks out the standard kernel thread manager, keeping the execution path un-preempted by background system tasks.
+
+Once the script displays that the pipeline is active, navigate your browser to `http://localhost:3000` to view the **Sequitur Real-Time Hardware Performance Monitor** live. To shut down the simulation and safely pull down all container networks, send an interrupt signal (**`Ctrl + C`**) to the running script window.
 
 ---
 
