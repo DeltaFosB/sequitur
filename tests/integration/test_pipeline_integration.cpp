@@ -15,8 +15,11 @@ TEST(PipelineIntegrationTest, EndToEndSPSCPipelineSession) {
 
   // Initialize core passive engine and asymmetric transit rings
   core::MatchingEngine engine(10000);
-  concurrency::MPSCQueue ingress_queue; // Correctly typed for IngressPackets
-  concurrency::SPSCQueue egress_queue;  // Correctly typed for EgressPackets
+
+  // Explicitly specify compile-time template types to avoid CTAD deduction
+  // failures
+  concurrency::MPSCQueue ingress_queue;
+  concurrency::SPSCQueue<core::EgressPacket, 8192> egress_queue;
 
   std::atomic<bool> trading_active{false};
   std::atomic<bool> ingress_ready{false};
@@ -30,11 +33,16 @@ TEST(PipelineIntegrationTest, EndToEndSPSCPipelineSession) {
     while (!trading_active.load(std::memory_order_acquire))
       ;
 
+    core::EgressPacket out_packet{};
     while (trading_active.load(std::memory_order_relaxed) ||
            !egress_queue.empty()) {
-      if (auto egress_packet = egress_queue.pop()) {
+      // Use zero-copy out-parameter pop extraction
+      if (egress_queue.pop(out_packet)) {
         total_egress_processed.fetch_add(1, std::memory_order_relaxed);
-        EXPECT_NE(egress_packet->match_price, 0);
+        EXPECT_NE(out_packet.match_price, 0);
+      } else {
+        std::this_thread::yield(); // Prevent aggressive core starvation on
+                                   // empty cycles
       }
     }
   });
@@ -58,8 +66,9 @@ TEST(PipelineIntegrationTest, EndToEndSPSCPipelineSession) {
           packet.price = 1000 + (i % 5);
           packet.client_order_id = static_cast<uint64_t>(i);
 
-          while (!ingress_queue.push(packet))
-            ;
+          while (!ingress_queue.push(packet)) {
+            std::this_thread::yield();
+          }
         }
       });
 
@@ -88,10 +97,14 @@ TEST(PipelineIntegrationTest, EndToEndSPSCPipelineSession) {
       report.match_quantity = ingress_packet->quantity;
       report.maker_id = ingress_packet->trader_id;
 
-      while (!egress_queue.push(report))
-        ;
+      // Pass by reference out-parameter push
+      while (!egress_queue.push(report)) {
+        std::this_thread::yield();
+      }
 
       processed_ingress++;
+    } else {
+      std::this_thread::yield();
     }
   }
 

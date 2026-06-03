@@ -42,69 +42,69 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-# liburing (Linux Async I/O for Gateway)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(URING REQUIRED liburing)
-
 # -----------------------------------------------------------------------------
 # 3. The Core Library (The Engine)
 # -----------------------------------------------------------------------------
-# Gather all sources (excluding main.cpp)
+# Gather all core trading engine math and matching logic sources
 file(GLOB_RECURSE SOURCES "src/**/*.cpp")
 list(FILTER SOURCES EXCLUDE REGEX "src/main.cpp")
+list(FILTER SOURCES EXCLUDE REGEX "src/utils/MetricsWorker.cpp")
 
 add_library(sequitur_core ${SOURCES})
 
-# Explicitly link system threads and liburing to the core engine
-target_link_libraries(sequitur_core 
-    PUBLIC 
-        ${URING_LIBRARIES}
+# Target-based include specification for the engine math headers
+target_include_directories(sequitur_core PUBLIC include)
+
+# -----------------------------------------------------------------------------
+# 4. The Main Application Executable (The Production Context)
+# -----------------------------------------------------------------------------
+# Creates the production executable from main.cpp and embeds the MetricsWorker translation unit
+add_executable(sequitur_engine 
+    src/main.cpp
+    src/utils/MetricsWorker.cpp
+)
+
+# Link the shared-nothing core matching logic and native system thread support
+target_link_libraries(sequitur_engine 
+    PRIVATE 
+        sequitur_core
         Threads::Threads
 )
 
-# Target-based include specification (Expose internal API headers and hardware pkg paths)
-target_include_directories(sequitur_core 
-    PUBLIC 
-        include
-        ${URING_INCLUDE_DIRS}
-    PRIVATE
-        ${gtest_SOURCE_DIR}/include
-)
-
-# -----------------------------------------------------------------------------
-# 4. The Executable (The Application)
-# -----------------------------------------------------------------------------
-add_executable(sequitur_engine src/main.cpp)
-target_link_libraries(sequitur_engine PRIVATE sequitur_core)
+# Specify include boundaries for the application context
+target_include_directories(sequitur_engine PRIVATE include)
 
 # -----------------------------------------------------------------------------
 # 5. Testing & Benchmarking (Direct Executables)
 # -----------------------------------------------------------------------------
 # Unit Tests
 file(GLOB_RECURSE UNIT_TEST_SOURCES "tests/unit/*.cpp")
-add_executable(unit_tests ${UNIT_TEST_SOURCES})
-target_link_libraries(unit_tests PRIVATE sequitur_core gtest_main)
+add_executable(unit_tests 
+    ${UNIT_TEST_SOURCES}
+    src/utils/MetricsWorker.cpp
+)
+target_link_libraries(unit_tests PRIVATE sequitur_core gtest_main Threads::Threads)
 
 # Integration Tests
 file(GLOB_RECURSE INTEGRATION_TEST_SOURCES "tests/integration/*.cpp")
-add_executable(integration_tests ${INTEGRATION_TEST_SOURCES})
-target_link_libraries(integration_tests PRIVATE sequitur_core gtest_main)
+add_executable(integration_tests 
+    ${INTEGRATION_TEST_SOURCES}
+    src/utils/MetricsWorker.cpp
+)
+target_link_libraries(integration_tests PRIVATE sequitur_core gtest_main Threads::Threads)
 
 # Latency Benchmarks (Exempted Standalone Target)
 # Bypasses the core static library boundary to compile matching source files directly
 add_executable(benchmarks 
     tests/benchmarks/bench_pure_latency.cpp
     src/core/MatchingEngine.cpp
+    src/utils/MetricsWorker.cpp
 )
 
 # Target-based include path specification for the standalone benchmark executable
-target_include_directories(benchmarks 
-    PRIVATE 
-        include
-        ${URING_INCLUDE_DIRS}
-)
+target_include_directories(benchmarks PRIVATE include)
 
 target_compile_definitions(benchmarks PRIVATE ENABLE_TELEMETRY)
 
-# Link ONLY liburing directly to the benchmark target, completely ignoring Threads::Threads
-target_link_libraries(benchmarks PRIVATE ${URING_LIBRARIES})
+# Link threads so the benchmark can test the decoupled pipeline harnesses
+target_link_libraries(benchmarks PRIVATE Threads::Threads)

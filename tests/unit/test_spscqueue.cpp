@@ -1,6 +1,5 @@
 #include <atomic>
 #include <gtest/gtest.h>
-#include <optional>
 #include <sequitur/concurrency/SPSCQueue.hpp>
 #include <sequitur/core/EgressPacket.hpp>
 #include <thread>
@@ -9,7 +8,8 @@ using namespace sequitur;
 
 // --- TEST 1: Basic Functional Path ---
 TEST(SPSCQueueTest, BasicPushPop) {
-  concurrency::SPSCQueue queue;
+  // Explicitly specialize the template for EgressPacket and default capacity
+  concurrency::SPSCQueue<core::EgressPacket, 2048> queue;
 
   // Zero-initialize the structure entirely to clear padding, then map explicit
   // values
@@ -21,11 +21,11 @@ TEST(SPSCQueueTest, BasicPushPop) {
   // Assert successful linear push
   ASSERT_TRUE(queue.push(packet));
 
-  // Assert successful extraction and structural matching
-  auto popped = queue.pop();
-  ASSERT_TRUE(popped.has_value());
-  EXPECT_EQ(popped->type, core::EgressType::ORDER_ACCEPTED);
-  EXPECT_EQ(popped->client_order_id, 55555);
+  // Assert successful extraction via pass-by-reference out-parameter
+  core::EgressPacket popped_packet{};
+  ASSERT_TRUE(queue.pop(popped_packet));
+  EXPECT_EQ(popped_packet.type, core::EgressType::ORDER_ACCEPTED);
+  EXPECT_EQ(popped_packet.client_order_id, 55555);
 
   // Queue should clear cleanly
   EXPECT_TRUE(queue.empty());
@@ -33,31 +33,30 @@ TEST(SPSCQueueTest, BasicPushPop) {
 
 // --- TEST 2: Capacity Boundary Backpressure ---
 TEST(SPSCQueueTest, QueueFullBackpressure) {
-  concurrency::SPSCQueue queue;
+  constexpr size_t TestCapacity = 16;
+  concurrency::SPSCQueue<core::EgressPacket, TestCapacity> queue;
 
   core::EgressPacket packet{};
   packet.type = core::EgressType::ORDER_ACCEPTED;
   packet.instrument_id = 1;
   packet.client_order_id = 111;
 
-  // Dynamically saturate the SPSC ring buffer until it rejects an entry.
-  // This satisfies the 1-cell dead property typical of lock-free power-of-2
-  // rings.
   size_t pushed_count = 0;
   while (queue.push(packet)) {
     pushed_count++;
   }
 
-  // With a capacity of 2048, the queue will cap exactly at 2047 items
-  EXPECT_EQ(pushed_count, 2047);
+  // Assert that your absolute distance optimization utilizes 100% of the
+  // Capacity!
+  EXPECT_EQ(pushed_count, TestCapacity);
 
-  // The next push must return false due to ring wrap-around boundary detection
+  // The next push must confirm a true structural backpressure state
   EXPECT_FALSE(queue.push(packet));
 }
 
 // --- TEST 3: Strict One-to-One Thread Streaming ---
 TEST(SPSCQueueTest, OneToOneProducerConsumerStreaming) {
-  concurrency::SPSCQueue queue;
+  concurrency::SPSCQueue<core::EgressPacket, 2048> queue;
 
   const size_t total_packets = 50000;
   std::atomic<bool> start_signal{false};
@@ -70,8 +69,7 @@ TEST(SPSCQueueTest, OneToOneProducerConsumerStreaming) {
         producer_ready.store(true, std::memory_order_release);
 
         // Block until the main thread drops the gate to isolate execution
-        // timings. yield() ensures the core is released on resource-constrained
-        // cloud environments.
+        // timings.
         while (!start_signal.load(std::memory_order_acquire)) {
           std::this_thread::yield();
         }
@@ -107,19 +105,19 @@ TEST(SPSCQueueTest, OneToOneProducerConsumerStreaming) {
   // thread)
   size_t processed_count = 0;
   size_t empty_spins = 0;
-  const size_t max_empty_spins = 500000;
+  const size_t max_empty_spins = 1000000;
+  core::EgressPacket consumer_packet{};
 
   while (processed_count < total_packets && empty_spins < max_empty_spins) {
-    if (auto packet = queue.pop()) {
-      EXPECT_EQ(packet->client_order_id, processed_count);
-      EXPECT_EQ(packet->maker_id, 1001);
-      EXPECT_EQ(packet->taker_id, 1010);
+    if (queue.pop(consumer_packet)) {
+      EXPECT_EQ(consumer_packet.client_order_id, processed_count);
+      EXPECT_EQ(consumer_packet.maker_id, 1001);
+      EXPECT_EQ(consumer_packet.taker_id, 1010);
       processed_count++;
       empty_spins = 0; // Reset tracking on successful hit
     } else {
       empty_spins++;
-      std::this_thread::yield(); // Let the producer thread work if the queue
-                                 // runs completely empty
+      std::this_thread::yield(); // Let the producer work if the queue runs dry
     }
   }
 

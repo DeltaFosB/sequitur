@@ -3,7 +3,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <sequitur/core/MatchingEngine.hpp>
+#include <memory>
+#include <sequitur/concurrency/SPSCQueue.hpp>
+#include <sequitur/core/MetricsPacket.hpp>
 #include <thread>
 
 namespace sequitur {
@@ -14,36 +16,25 @@ private:
   static constexpr std::size_t NUM_BUCKETS = 2048;
   static constexpr uint64_t CPU_HZ = 3600000000;
 
-  const core::MatchingEngine &engine_;
+  // The worker holds a shared pointer to the queue instantiated in main
+  std::shared_ptr<concurrency::SPSCQueue<core::MetricsPacket, 4096>> queue_;
+
   std::atomic<bool> active_{false};
   std::thread worker_thread_;
 
-  alignas(64) std::atomic<uint32_t> latency_buckets_[NUM_BUCKETS]{};
-  std::atomic<uint64_t> latency_outliers_{0};
-  std::atomic<uint64_t> backpressure_events_{0};
+  // Thread-local metrics structures populated entirely within Core 4's context
+  uint32_t latency_buckets_[NUM_BUCKETS]{};
+  uint64_t latency_outliers_{0};
+  uint64_t backpressure_events_{0};
 
   void logging_loop();
 
 public:
-  explicit MetricsWorker(const core::MatchingEngine &engine);
+  explicit MetricsWorker(
+      std::shared_ptr<concurrency::SPSCQueue<core::MetricsPacket, 4096>> queue);
   ~MetricsWorker();
 
-  // High-performance API called by the out-of-band IPC loop to pass measured
-  // wire cycles
-  void record_latency(uint64_t delta_cycles) noexcept {
-    uint64_t latency_ns = (delta_cycles * 1000000000) / CPU_HZ;
-
-    if (latency_ns < NUM_BUCKETS) {
-      latency_buckets_[latency_ns].fetch_add(1, std::memory_order_relaxed);
-    } else {
-      latency_outliers_.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
-
-  // Increments backpressure counts using relaxed semantics out of the hot path
-  void record_backpressure() noexcept {
-    backpressure_events_.fetch_add(1, std::memory_order_relaxed);
-  }
+  void shutdown() noexcept;
 };
 
 } // namespace utils
