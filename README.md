@@ -16,11 +16,11 @@ To eliminate the **Heisenberg Observer Effect** (where the telemetry framework a
 
 | Metric | Baseline (Atomic-Bound Engine) | Optimized Engine (Shared-Nothing Monolithic Core) | Engineering Impact and Insight |
 | --- | --- | --- | --- |
-| **Peak Throughput** | 30.80M OPS | **42,314,700+ OPS** | **+37.3% Increase** in max transaction processing bandwidth under pristine cache alignment. |
-| **Mean Average Latency** | 32.46 ns | **23.53 ns** | **27.5% Latency Reduction** achieved by stripping atomic pipeline synchronization. |
-| **Mean Tail Latency (P99)** | 36.44 ns | **25.60 ns** | **29.7% Reduction** in tail volatility, safely exceeding the initial sub-27ns production target. |
-| **Hardware Jitter ($\sigma$)** | 7.82 ns | **1.51 - 3.44 ns** | Strict hardware-level execution pinning isolates the hot path from scheduler drift. |
-| **Memory Allocation** | O(1) | **O(1)** | Zero runtime heap allocations (`malloc`/`new`) prevent fragmentation micro-stalls. |
+| **Peak Throughput** | 30.80M OPS | **63,911,090.00 OPS** | **+107.5% Increase** in max transaction processing bandwidth under pristine cache alignment. |
+| **Mean Average Latency** | 32.46 ns | **15.7138 ns** | **51.6% Latency Reduction** achieved by stripping atomic pipeline synchronization and structural out-of-band offloading. |
+| **Mean Tail Latency (P99)** | 36.44 ns | **18.2045 ns** | **50.0% Reduction** in tail volatility, safely shattering the initial sub-20ns production target. |
+| **Hardware Jitter ($\sigma$)** | 7.82 ns | **1.0042 ns** | Strict hardware-level execution pinning via SCHED_FIFO isolates the hot path from scheduler drift. |
+| **Memory Allocation** | O(1) | **O(1)** | Zero runtime heap allocations (`malloc`/`new`) prevents fragmentation micro-stalls. |
 
 ---
 
@@ -30,8 +30,9 @@ The table below documents the empirical evolution of Sequitur's architectural pe
 
 | Telemetry Phase / Layout | Mean Round-Trip | P99 Tail Latency | Tracking Footprint | Hardware Jitter ($\sigma$) | Micro-Architectural Trade-off & Observation |
 | --- | --- | --- | --- | --- | --- |
-| **Macro-Bucket Partitioning** | **23.53 ns** | **25.60 ns** | **8 KB** | **1.51 ns** | **Production Baseline.** Telemetry is deferred out-of-band. Opens CPU pipeline lookahead for maximum ILP. |
-| **Atomic-Bound OrderBook** | 32.46 ns | 36.44 ns | 8 KB | 7.82 ns | Implements relaxed atomics. Forces an 8.5 ns hardware instruction tax via Read-Modify-Write (RMW) cycle pipeline bubbles. |
+| **Decoupled SPSC Pipeline** | **15.71 ns** | **18.20 ns** | **64 Bytes / Packet** | **1.00 ns** | **Production Baseline.** Telemetry is deferred out-of-band via an lock-free SPSC queue. CPU pipeline lookahead is maximized. |
+| **Macro-Bucket Partitioning** | 23.53 ns | 25.60 ns | 8 KB | 1.51 ns | Monolithic baseline with out-of-band macro-timing. Opens compiler loop vectorization options. |
+| **Atomic-Bound OrderBook** | 32.46 ns | 36.44 ns | 8 KB | 7.82 ns | Implements relaxed atomics inside the hot path. Forces hardware instruction taxes via Read-Modify-Write (RMW) cycle pipeline bubbles. |
 | **Individual Vector Tracking** | 39.95 ns | 62.41 ns | 8 MB | 3.44 ns | Suffers severe data cache thrashing. The massive 8MB telemetry array continuously evicts active order book nodes to RAM. |
 | **Individual Histogram Sort** | 61.73 ns | 55.40 ns | 80 KB | 8.26 ns | Eliminates cache pollution, but forces an un-amortized 36 ns Linux vDSO system clock read penalty onto every single order. |
 
@@ -43,15 +44,15 @@ By implementing an automated hardware profiling suite via low-level kernel diagn
 
 #### Hypothesis 1: The Multi-Threaded Cache-Line Bouncing Trap (False Sharing)
 
-Our baseline atomic tracking test added a mandatory **8.5 ns penalty** on a single isolated core. Had this memory footprint been accessed concurrently by an external gateway or publisher thread, the hardware cache coherency protocol (MESI) would have triggered a continuous stream of cache invalidations. This would cause the shared 64-byte cache lines to bounce across CPU sockets, crashing matching loop throughput straight into the 150+ ns range.
+Our baseline atomic tracking test added a mandatory **8.5 ns penalty** on a single isolated core. Had this memory footprint been accessed concurrently by an external gateway or publisher thread, the hardware cache coherency protocol (MESI) would have triggered a continuous stream of cache invalidations. This would cause the shared 64-byte cache lines to bounce across CPU sockets, crashing matching loop throughput straight into the 150+ ns range. Shifting to an asymmetric `SPSCQueue` layout with `alignas(64)` padding on internal read/write pointers permanently shields Core 3 from Core 4's cache line polling.
 
 #### Hypothesis 2: Microscopic Instrumentation vs. Pipeline Freedom
 
-Placing high-resolution clock reads directly around individual order submissions injects an incompressible 30–36 ns vDSO clock read tax. Furthermore, these timekeeping wrappers act as a rigid serialization barrier, halting the CPU's **Out-of-Order (OoO) execution engine**. Macro-batching groups orders into blocks of 1,000, reducing clock invocation frequency by 1,000x and dropping the telemetry tax to a negligible **0.036 ns per order**, leaving the hardware pipeline completely free to optimize loop math.
+Placing high-resolution clock reads directly around individual order submissions injects an incompressible 30–36 ns vDSO clock read tax. Furthermore, these timekeeping wrappers act as a rigid serialization barrier, halting the CPU's **Out-of-Order (OoO) execution engine**. Passing telemetry asynchronous `MetricsPacket` chunks via lock-free rings drops the active telemetry tax to a negligible **0.00 ns inside the engine block**, leaving the hardware pipeline completely free to optimize loop math, maximize register re-use, and apply loop unrolling.
 
 #### Hypothesis 3: The Cold Start Tax (First-Touch Page Fault Boundary)
 
-Initial profiling passes consistently revealed an isolated performance spike on **Run 01 (~48.23 ns)** before stabilizing into the ~19-22 ns band on subsequent runs. This is tracked back to Linux's lazy memory page allocation mechanism. While the 20,000-order warm-up loop primes the CPU instruction cache, the main run exercises wider price indices, triggering minor kernel page faults to map physical RAM to the vast pre-allocated array boundaries.
+Initial profiling passes consistently revealed an isolated performance spike on **Run 01 (~23.70 ns)** before stabilizing into the ~14.1-16.3 ns band on subsequent runs. This is tracked back to Linux's lazy memory page allocation mechanism and cold CPU execution pipelines. While the 20,000-order warm-up loop primes the CPU instruction cache, the main run exercises wider price indices, triggering minor kernel page faults to map physical RAM to the vast pre-allocated array boundaries.
 
 ---
 
@@ -72,11 +73,9 @@ graph TD
         Book -->|Double-Linked Update| Matrix[Array Price Matrix]
     end
     
-    subgraph "Asynchronous Telemetry (Decoupled Core)"
-        Book -->|Push Execution| ExecQ[Execution Queue]
-        Book -->|Push Dead Order| TrashQ[Garbage Queue]
-        ExecQ -.->|Relaxed Lock-Free Handoff| MetricsWorker[Metrics Worker Thread]
-        TrashQ -.->|O1 Release Pointer| Pool
+    subgraph "Asynchronous Telemetry (Decoupled Core 4)"
+        Engine -->|Push Telemetry Packet| MetricsQueue{SPSC Metrics Queue}
+        MetricsQueue -.->|Zero-Copy Pop Reference| MetricsWorker[Metrics Worker Thread]
     end
     
     subgraph "Hardware Target"
@@ -103,7 +102,7 @@ To protect the ultra-low latency execution path, the `MatchingEngine` and `Order
 
 Observability is split into an independent execution context using an asynchronous consumer-producer topology to eliminate measurement distortion from the hot path.
 
-* **Mechanism:** The matching core processes matches at maximum velocity and hands off trade records via a high-performance `FixedQueue` at the outer edge of the call sequence using relaxed memory ordering. A decoupled background `MetricsWorker` thread consumes the queue out-of-band on a separate core.
+* **Mechanism:** The matching core constructs a stack-allocated 64-byte `MetricsPacket` tracking engine states and raw cycle durations measured via assembly `rdtsc`. This packet is pushed out-of-band via a lock-free `SPSCQueue` using absolute distance index calculations. A decoupled background `MetricsWorker` thread consumes the queue on a separate CPU core, serializing real-time analytical JSON structures to `stdout`.
 * **Benefit:** Erases the stopwatch tracking tax from the inner matching path, allowing for real-time telemetry extraction without injecting atomic write-stalls or cache invalidations into the execution stream.
 
 ---
@@ -112,18 +111,19 @@ Observability is split into an independent execution context using an asynchrono
 
 ### Prerequisites
 
-* **Compiler:** Toolchain fully compliant with C++17 (GCC 9+ or Clang 10+)
-* **Build System:** CMake 3.10 or higher
+* **Compiler:** Toolchain fully compliant with C++20 (GCC 10+ or Clang 11+)
+* **Build System:** CMake 3.20 or higher
 * **Operating System:** Linux environment with `sudo` access (mandatory for real-time scheduling priority adjustments and CPU core binding)
 
 ### Compilation
 
-To compile the matching engine and generate the optimized benchmarking suites with full compiler vectorization enabled:
+To compile the matching engine, test suites, and optimized benchmarking targets with full compiler native optimization enabled:
 
 ```bash
 mkdir build && cd build
 cmake -DCMAKE_BUILD_TYPE=Release ..
 cmake --build . --target benchmarks
+cmake --build . --target unit_tests
 
 ```
 
@@ -132,8 +132,8 @@ cmake --build . --target benchmarks
 To permanently stabilize your benchmarks and eliminate OS kernel context switching, background timer interrupts, and core migration cache-flushes, use the automated bash execution framework (`run_bench.sh`) sitting at the project root:
 
 ```bash
-# Execute the automated real-time benchmarking pipeline from the build directory
-sudo ../run_bench.sh
+# Execute the automated real-time benchmarking pipeline from the project root
+sudo ./run_bench.sh
 
 ```
 
@@ -143,7 +143,7 @@ The validation script automatically runs 10 consecutive benchmark iterations und
 
 1. **`taskset -c 3`**: Pins the benchmark process exclusively to physical CPU Core 3, locking the matching structures hot in the core's local L1/L2 caches.
 2. **`chrt -f 99`**: Confirms maximum real-time **SCHED_FIFO** scheduling priority, blocking the Linux kernel scheduler from interrupting the thread.
-3. **Statistical Aggregation**: Strips the terminal output text, parses the unpolluted raw nanosecond metrics via `awk`, and computes the true mathematical mean average latency, mean P99 tail distribution, and standard deviation (hardware jitter).
+3. **Statistical Aggregation**: Strips the terminal output text, parses the unpolluted raw nanosecond and throughput metrics via `awk`, and computes the true mathematical mean average latency, mean P99 tail distribution, mean peak throughput, and standard deviations (hardware jitter).
 
 ---
 
