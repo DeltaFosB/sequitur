@@ -17,3 +17,6 @@ _deps/
 # System / Logs
 .DS_Store
 *.log
+
+# Telemetry
+.vector_data/

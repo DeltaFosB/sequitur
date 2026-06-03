@@ -1,0 +1,38 @@
+# Global settings configuration
+data_dir = "./.vector_data"  # Forces Vector to store metadata locally in user-space
+
+[sources.sequitur_logs]
+type = "file"
+include = ["/dev/shm/sequitur/telemetry.log"]
+read_from = "end"
+
+[transforms.parse_json]
+type = "remap"
+inputs = ["sequitur_logs"]
+source = """
+# 1. Drop non-JSON auxiliary lines safely before parsing
+if !starts_with(string!(.message), "{") {
+    abort
+}
+
+# 2. Parse the verified JSON transaction line safely
+parsed, err = parse_json(.message)
+if err != null {
+    abort
+}
+
+# 3. Use the bang operator to handle object merging infallibly
+. = merge!(., parsed)
+
+# 4. Handle metric target naming using infallible string coercion
+.metric_name = "sequitur_" + string(.latency_scope) ?? "unknown_scope"
+"""
+
+# Destination Sink: Route directly to your local Loki container
+[sinks.grafana_loki]
+type = "loki"
+inputs = ["parse_json"]
+endpoint = "http://localhost:3100"
+encoding.codec = "json"
+labels.app = "sequitur_engine"
+labels.clock_source = "{{ clock_source }}"
