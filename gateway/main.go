@@ -1,12 +1,28 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 )
 
 func HandleClient(conn net.Conn) {
-	// Client processing logic goes here
+	defer conn.Close()
+	reader := bufio.NewReader(conn)
+	for {
+		message, err := reader.ReadString('\n')
+		if err != nil {
+			fmt.Println("Client Disconnected.")
+			return
+		}
+		fmt.Println("Recieved: ", message)
+		var packet IngressPacket
+		err = packet.ParseCSV(message)
+		if err != nil {
+			fmt.Println("Parsing error: ", err)
+		}
+		continue
+	}
 }
 
 func main() {
