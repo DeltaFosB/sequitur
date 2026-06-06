@@ -6,7 +6,7 @@ import (
 	"net"
 )
 
-func HandleClient(conn net.Conn) {
+func HandleClient(conn net.Conn, shm *SharedMemory) {
 	defer conn.Close()
 	reader := bufio.NewReader(conn)
 	for {
@@ -21,11 +21,16 @@ func HandleClient(conn net.Conn) {
 		if err != nil {
 			fmt.Println("Parsing error: ", err)
 		}
+
+		// TODO: shm.Enqueue(packet)
 		continue
 	}
 }
 
 func main() {
+	var shm SharedMemory
+	shm.InitSharedMemory()
+
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
 		fmt.Println("Socket creation failed.")
@@ -39,6 +44,6 @@ func main() {
 		}
 		fmt.Println("New market client connected!")
 
-		go HandleClient(conn)
+		go HandleClient(conn, &shm)
 	}
 }
