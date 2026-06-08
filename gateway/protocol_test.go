@@ -2,7 +2,43 @@ package main
 
 import (
 	"testing"
+	"unsafe"
 )
+
+func TestStructAlignment(t *testing.T) {
+	var p IngressPacket
+
+	// 1. Assert overall data slot layout is exactly 32 bytes
+	if unsafe.Sizeof(p) != 32 {
+		t.Fatalf("IngressPacket overall size mismatch: expected 32 bytes, got %d", unsafe.Sizeof(p))
+	}
+
+	// 2. Assert precise byte boundaries inside the struct frame
+	if unsafe.Offsetof(p.Type) != 0 {
+		t.Errorf("Type offset mismatch: expected 0, got %d", unsafe.Offsetof(p.Type))
+	}
+	if unsafe.Offsetof(p.Side) != 1 {
+		t.Errorf("Side offset mismatch: expected 1, got %d", unsafe.Offsetof(p.Side))
+	}
+	if unsafe.Offsetof(p.Padding16) != 2 {
+		t.Errorf("Padding16 offset mismatch: expected 2, got %d", unsafe.Offsetof(p.Padding16))
+	}
+	if unsafe.Offsetof(p.InstrumentID) != 4 {
+		t.Errorf("InstrumentID offset mismatch: expected 4, got %d", unsafe.Offsetof(p.InstrumentID))
+	}
+	if unsafe.Offsetof(p.TraderID) != 8 {
+		t.Errorf("TraderID offset mismatch: expected 8, got %d", unsafe.Offsetof(p.TraderID))
+	}
+	if unsafe.Offsetof(p.Quantity) != 12 {
+		t.Errorf("Quantity offset mismatch: expected 12, got %d", unsafe.Offsetof(p.Quantity))
+	}
+	if unsafe.Offsetof(p.Price) != 16 {
+		t.Errorf("Price offset mismatch: expected 16, got %d", unsafe.Offsetof(p.Price))
+	}
+	if unsafe.Offsetof(p.ClientOrderID) != 24 {
+		t.Errorf("ClientOrderID offset mismatch: expected 24, got %d", unsafe.Offsetof(p.ClientOrderID))
+	}
+}
 
 func TestParseCSV_Matrix(t *testing.T) {
 	testCases := []struct {
