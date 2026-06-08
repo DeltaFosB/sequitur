@@ -15,7 +15,7 @@ func HandleClient(conn net.Conn, packetChan chan<- IngressPacket) {
 			fmt.Println("Client Disconnected.")
 			return
 		}
-		fmt.Println("Received: ", message)
+		// fmt.Println("Received: ", message)
 
 		var packet IngressPacket
 		err = packet.ParseCSV(message)
