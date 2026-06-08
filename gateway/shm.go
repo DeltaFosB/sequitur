@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sync/atomic"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -41,4 +42,24 @@ func (shm *SharedMemory) InitSharedMemory() {
 	shm.read_idx = (*int64)(unsafe.Pointer(&data[0]))
 	shm.write_idx = (*int64)(unsafe.Pointer(&data[8]))
 	shm.buffer = uintptr(unsafe.Pointer(&data[16]))
+}
+
+func (shm *SharedMemory) Enqueue(packet IngressPacket) bool {
+	currRead := atomic.LoadInt64(shm.read_idx)
+	currWrite := *shm.write_idx
+
+	diff := currWrite - currRead
+
+	if diff == int64(SIZE) {
+		return false
+	}
+
+	slotIndex := currWrite & int64(SIZE-1)
+	targetAddr := shm.buffer + uintptr(slotIndex)*unsafe.Sizeof(IngressPacket{})
+	packetSlot := (*IngressPacket)(unsafe.Pointer(targetAddr))
+	*packetSlot = packet
+
+	atomic.StoreInt64(shm.write_idx, currWrite+1)
+
+	return true
 }
