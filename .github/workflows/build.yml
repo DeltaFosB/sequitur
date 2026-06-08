@@ -15,6 +15,44 @@ jobs:
       - name: "Checkout Source Code"
         uses: actions/checkout@v4
 
+      # ----------------------------------------------------
+      # GO GATEWAY BUILD & TEST SUITE
+      # ----------------------------------------------------
+      - name: "Setup Go Development Environment"
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache-dependency-path: gateway/go.sum
+
+      - name: "Execute Go Testing Pipeline"
+        working-directory: ./gateway
+        run: |
+          echo "### Go Gateway Verification Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Go Component Verification:** Running active test suite..." >> $GITHUB_STEP_SUMMARY
+          
+          # Run all component unit tests and end-to-end integration flows
+          go test -v protocol_test.go protocol.go >> $GITHUB_STEP_SUMMARY
+          go test -v shm_test.go shm.go protocol.go >> $GITHUB_STEP_SUMMARY
+          go test -v gateway_test.go main.go shm.go protocol.go >> $GITHUB_STEP_SUMMARY
+          
+          echo "✓ All Go components passed integration constraints cleanly." >> $GITHUB_STEP_SUMMARY
+
+      - name: "Profile Go Hot-Path Throughput Benchmarks"
+        working-directory: ./gateway
+        run: |
+          echo "### Go Gateway Performance Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`text" >> $GITHUB_STEP_SUMMARY
+          
+          # Profile data parsing, ring buffer locks, and network loopback streams
+          go test -bench=BenchmarkParseCSV -benchmem protocol_test.go protocol.go >> $GITHUB_STEP_SUMMARY
+          go test -bench=BenchmarkEnqueue -benchmem shm_test.go shm.go protocol.go >> $GITHUB_STEP_SUMMARY
+          go test -bench=BenchmarkGatewayIntegration -benchmem gateway_test.go main.go shm.go protocol.go >> $GITHUB_STEP_SUMMARY
+          
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      # ----------------------------------------------------
+      # C++ MATCHING ENGINE BUILD & TEST SUITE
+      # ----------------------------------------------------
       - name: "Install System Dependencies"
         run: sudo apt-get update && sudo apt-get install -y liburing-dev
 
@@ -26,7 +64,7 @@ jobs:
 
       - name: "Execute Automated Tests"
         run: |
-          echo "### Dynamic Test Suite Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "### Dynamic C++ Test Suite Execution Summary" >> $GITHUB_STEP_SUMMARY
           
           # 1. Run Unit Tests and export metrics to JSON
           ./build/unit_tests --gtest_output=json:build/unit_results.json --gtest_brief=1
@@ -42,9 +80,8 @@ jobs:
 
       - name: "Execute Performance Benchmarks"
         run: |
-          echo "### Hot-Path Performance Benchmarks" >> $GITHUB_STEP_SUMMARY
+          echo "### Hot-Path C++ Performance Benchmarks" >> $GITHUB_STEP_SUMMARY
           
-          # Append the raw text output of your benchmark track directly into the markdown summary
           echo "\`\`\`text" >> $GITHUB_STEP_SUMMARY
           ./build/benchmarks >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
