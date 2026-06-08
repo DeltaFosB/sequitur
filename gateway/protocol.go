@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -94,6 +95,9 @@ func (packet *IngressPacket) ParseCSV(line string) error {
 		left = right
 		counter++
 
+	}
+	if counter != 7 {
+		return fmt.Errorf("incomplete packet: expected 7 fields, got %d", counter)
 	}
 	return nil
 }
