@@ -9,8 +9,8 @@ import (
 )
 
 var (
-	SIZE      int = 1024
-	totalSize int = 8 + 8 + SIZE*int(unsafe.Sizeof(IngressPacket{}))
+	SIZE      int64 = 65536
+	totalSize int   = 8 + 8 + int(SIZE)*int(unsafe.Sizeof(IngressPacket{}))
 )
 
 type SharedMemory struct {
@@ -46,7 +46,7 @@ func (shm *SharedMemory) InitSharedMemory() {
 
 func (shm *SharedMemory) Enqueue(packet IngressPacket) bool {
 	currRead := atomic.LoadInt64(shm.read_idx)
-	currWrite := *shm.write_idx
+	currWrite := atomic.LoadInt64(shm.write_idx)
 
 	diff := currWrite - currRead
 
@@ -54,7 +54,7 @@ func (shm *SharedMemory) Enqueue(packet IngressPacket) bool {
 		return false
 	}
 
-	slotIndex := currWrite & int64(SIZE-1)
+	slotIndex := currWrite & (SIZE - 1)
 	targetAddr := shm.buffer + uintptr(slotIndex)*unsafe.Sizeof(IngressPacket{})
 	packetSlot := (*IngressPacket)(unsafe.Pointer(targetAddr))
 	*packetSlot = packet

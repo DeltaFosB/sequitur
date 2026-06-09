@@ -35,7 +35,7 @@ int main() {
   std::signal(SIGTERM, signal_handler);
 
   // --- 1. Map the POSIX Shared Memory Segment ---
-  constexpr size_t RING_SIZE = 1024;
+  constexpr size_t RING_SIZE = 65536;
   constexpr size_t SHM_SIZE = 8 + 8 + (RING_SIZE * sizeof(core::IngressPacket));
 
   int shm_fd = shm_open("sequitur_shm", O_RDWR, 0666);
@@ -108,7 +108,7 @@ int main() {
         size_t pool_capacity = engine.get_pool_capacity();
 
         // 5. Evaluate memory pool backpressure on the core side
-        core::MetricsPacket m_packet{};
+        [[maybe_unused]] core::MetricsPacket m_packet{};
         if (pool_failures > 0 ||
             pool_used >= static_cast<size_t>(pool_capacity * 0.95))
             [[unlikely]] {
@@ -127,7 +127,7 @@ int main() {
         m_packet.pool_capacity = pool_capacity;
 
         // 7. Unidirectional drop into the lock-free SPSC queue (Out-of-band)
-        metrics_queue->push(m_packet);
+        // metrics_queue->push(m_packet);
       } else {
         // Spin-wait optimization: Instructs CPU we are idling inside a
         // spin-lock
