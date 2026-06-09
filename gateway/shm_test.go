@@ -26,7 +26,7 @@ func TestRingBufferFull(t *testing.T) {
 	}
 
 	// 3. Loop exactly 1024 times to fill every single slot in the ring buffer array
-	for i := 0; i < SIZE; i++ {
+	for i := 0; i < int(SIZE); i++ {
 		success := shm.Enqueue(mockPacket)
 		if !success {
 			t.Fatalf("Queue failed prematurely at index %d; expected true but got false", i)
