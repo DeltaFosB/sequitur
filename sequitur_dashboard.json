@@ -1,0 +1,95 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "liveNow": true,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "Sequitur Core Processing - Total Ingress Invariants",
+      "type": "timeseries",
+      "datasource": { "type": "loki" },
+      "targets": [
+        {
+          "datasource": { "type": "loki" },
+          "editorMode": "code",
+          "expr": "sum by (app) (last_over_time({app=\"sequitur_engine\"} | json | unwrap total_orders [1m]))",
+          "legendFormat": "Total Orders Handled",
+          "queryType": "range"
+        },
+        {
+          "datasource": { "type": "loki" },
+          "editorMode": "code",
+          "expr": "sum by (app) (last_over_time({app=\"sequitur_engine\"} | json | unwrap total_trades [1m]))",
+          "legendFormat": "Total Matching Trades",
+          "queryType": "range"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth" },
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "title": "Sub-Microsecond Latency Profiles (Go -> C++ IPC Boundary)",
+      "type": "timeseries",
+      "datasource": { "type": "loki" },
+      "targets": [
+        {
+          "datasource": { "type": "loki" },
+          "editorMode": "code",
+          "expr": "avg by (app) (avg_over_time({app=\"sequitur_engine\"} | json | unwrap p50_latency_ns [1m]))",
+          "legendFormat": "P50 Median Latency",
+          "queryType": "range"
+        },
+        {
+          "datasource": { "type": "loki" },
+          "editorMode": "code",
+          "expr": "avg by (app) (avg_over_time({app=\"sequitur_engine\"} | json | unwrap p99_latency_ns [1m]))",
+          "legendFormat": "P99 Tail Latency",
+          "queryType": "range"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "drawStyle": "line", "lineInterpolation": "stepAfter" },
+          "unit": "ns"
+        }
+      }
+    }
+  ],
+  "refresh": "100ms",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["hft", "sequitur"],
+  "timezone": "",
+  "title": "Sequitur Real-Time Hardware Performance Monitor",
+  "uid": "sequitur-hft-monitor",
+  "time": { "from": "now-5m", "to": "now" },
+  "timepicker": { "refresh_intervals": ["100ms", "500ms", "1s"] },
+  "version": 1
+}
