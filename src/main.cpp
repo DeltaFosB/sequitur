@@ -85,7 +85,7 @@ int main() {
       if (current_read != current_write) {
         uint64_t start_cycles = read_rdtsc();
 
-        // 1. Calculate bitwise slot offset and read the 32-byte packet
+        // 1. Calculate bitwise slot offset and read the packet
         size_t slot = current_read & (RING_SIZE - 1);
         const core::IngressPacket &packet = ring_buffer[slot];
 
@@ -94,19 +94,20 @@ int main() {
           engine.submit_order(packet.side, packet.price, packet.quantity);
         }
 
+        // FIXED: Stop the timing window IMMEDIATELY after execution
+        uint64_t end_cycles = read_rdtsc();
+        uint64_t elapsed_cycles = end_cycles - start_cycles;
+
         // 3. Hardware memory release: Tell Go we finished reading this slot
         current_read++;
         read_idx->store(current_read, std::memory_order_release);
 
-        uint64_t end_cycles = read_rdtsc();
-        uint64_t elapsed_cycles = end_cycles - start_cycles;
-
-        // 4. Extract hot memory pool metrics directly from the local core state
+        // 4. Extract hot memory pool metrics directly from local core state
         size_t pool_used = engine.get_pool_used();
         size_t pool_failures = engine.get_pool_failures();
         size_t pool_capacity = engine.get_pool_capacity();
 
-        // 5. Evaluate memory pool backpressure directly on the core side
+        // 5. Evaluate memory pool backpressure on the core side
         core::MetricsPacket m_packet{};
         if (pool_failures > 0 ||
             pool_used >= static_cast<size_t>(pool_capacity * 0.95))
@@ -125,21 +126,29 @@ int main() {
         m_packet.pool_peak = engine.get_pool_peak();
         m_packet.pool_capacity = pool_capacity;
 
-        // 7. Unidirectional drop into the lock-free SPSC queue
+        // 7. Unidirectional drop into the lock-free SPSC queue (Out-of-band)
         metrics_queue->push(m_packet);
       } else {
-        // Spin-wait optimization: Instructs CPU we are in a spin-lock state
-        // Reduces thermal load and avoids pipeline flushing
+        // Spin-wait optimization: Instructs CPU we are idling inside a
+        // spin-lock
         __builtin_ia32_pause();
       }
     }
   });
 
+  // --- 4. Keep Main Thread Alive to Allow Concurrency ---
+  // Instead of joining immediately and blocking main thread progression,
+  // spin-wait here until a system termination signal flags engine_active to
+  // false.
+  while (engine_active.load(std::memory_order_relaxed)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+
+  // --- 5. Graceful Teardown Sequence ---
   if (core_thread.joinable()) {
     core_thread.join();
   }
 
-  // --- 4. Graceful Teardown ---
   munmap(shm_base, SHM_SIZE);
   close(shm_fd);
   worker.shutdown();
