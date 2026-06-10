@@ -24,8 +24,10 @@ private:
   alignas(64) std::atomic<size_t> head_{
       0}; // Exclusively modified by the Consumer thread
 
-  // Thread-local shadow cursor to block redundant cross-core acquire cycles
-  size_t cached_head_{0};
+  // Instance-bound local tracking shadow cursor. Isolated via explicit
+  // alignment to protect the producer's hot path workspace from cross-core
+  // cache invalidation.
+  alignas(64) size_t cached_head_{0};
 
   std::atomic<bool> stop_flag_{false};
 
@@ -48,7 +50,8 @@ public:
 
     size_t t = tail_.load(std::memory_order_relaxed);
 
-    // Check shadow tracking first. Avoids L1 data cache eviction unless full
+    // Check shadow tracking first. Avoids cross-core L1 data cache misses
+    // unless full
     if ((t - cached_head_) >= Capacity) {
       cached_head_ =
           head_.load(std::memory_order_acquire); // Explicit hardware sync fence

@@ -127,7 +127,13 @@ int main() {
         m_packet.pool_capacity = pool_capacity;
 
         // 7. Unidirectional drop into the lock-free SPSC queue (Out-of-band)
-        // metrics_queue->push(m_packet);
+
+        bool push_success = metrics_queue->push(m_packet);
+        if (!push_success) {
+          std::cout << "[Queue Alert] Packet push rejected by SPSCQueue! "
+                       "Buffer structure reports full boundary reached."
+                    << std::endl;
+        }
       } else {
         // Spin-wait optimization: Instructs CPU we are idling inside a
         // spin-lock
@@ -137,16 +143,29 @@ int main() {
   });
 
   // --- 4. Keep Main Thread Alive to Allow Concurrency ---
-  // Instead of joining immediately and blocking main thread progression,
-  // spin-wait here until a system termination signal flags engine_active to
-  // false.
   while (engine_active.load(std::memory_order_relaxed)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 
   // --- 5. Graceful Teardown Sequence ---
+  std::cout << "[Teardown Diagnostic] Main active signal killed. Rejoining "
+               "running pipelines..."
+            << std::endl;
+
   if (core_thread.joinable()) {
     core_thread.join();
+  }
+
+  // Inspect if data points are remaining trapped in the queue space on
+  // execution exit boundary
+  if (!metrics_queue->empty()) {
+    std::cout << "[Teardown Diagnostic] Warning: SPSC Queue is shutting down "
+                 "with unprocessed telemetry items inside!"
+              << std::endl;
+  } else {
+    std::cout << "[Teardown Diagnostic] SPSC Queue reporting completely "
+                 "clean/empty closure."
+              << std::endl;
   }
 
   munmap(shm_base, SHM_SIZE);

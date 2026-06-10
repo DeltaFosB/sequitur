@@ -36,10 +36,14 @@ void MetricsWorker::logging_loop() {
   uint64_t pool_failures = 0;
   uint64_t pool_peak = 0;
 
-  while (active_.load(std::memory_order_relaxed)) {
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  auto last_report_time = std::chrono::steady_clock::now();
+  const auto report_interval = std::chrono::milliseconds(250);
 
+  while (active_.load(std::memory_order_relaxed)) {
     bool data_processed = false;
+
+    // Drain the lock-free queue instantly as data arrives without an initial
+    // sleep block
     while (queue_ && queue_->pop(packet)) {
       data_processed = true;
 
@@ -61,7 +65,10 @@ void MetricsWorker::logging_loop() {
       }
     }
 
+    // If the queue was empty, drop into a micro-sleep here to free up core
+    // cycles
     if (!data_processed) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
       continue;
     }
 
@@ -132,59 +139,65 @@ void MetricsWorker::logging_loop() {
       }
     };
 
-    append_str("{", 1);
-    append_str("\"latency_scope\":\"matching_core_isolated\",", 41);
-    append_str("\"clock_source\":\"rdtsc\",", 23);
-    append_str("\"cpu_hz_estimated\":3600000000,", 30);
+    auto current_time = std::chrono::steady_clock::now();
+    if (current_time - last_report_time >= report_interval) {
+      last_report_time = current_time;
+      append_str("{", 1);
+      append_str("\"latency_scope\":\"matching_core_isolated\",", 41);
+      append_str("\"clock_source\":\"rdtsc\",", 23);
+      append_str("\"cpu_hz_estimated\":3600000000,", 30);
 
-    append_str("\"total_orders\":", 15);
-    ptr = std::to_chars(ptr, end, current_orders).ptr;
-    append_str(",", 1);
+      append_str("\"total_orders\":", 15);
+      ptr = std::to_chars(ptr, end, current_orders).ptr;
+      append_str(",", 1);
 
-    append_str("\"total_trades\":", 15);
-    ptr = std::to_chars(ptr, end, current_trades).ptr;
-    append_str(",", 1);
+      append_str("\"total_trades\":", 15);
+      ptr = std::to_chars(ptr, end, current_trades).ptr;
+      append_str(",", 1);
 
-    append_str("\"fill_rate\":", 12);
-    ptr = std::to_chars(ptr, end, fill_rate, std::chars_format::fixed, 4).ptr;
-    append_str(",", 1);
+      append_str("\"fill_rate\":", 12);
+      ptr = std::to_chars(ptr, end, fill_rate, std::chars_format::fixed, 4).ptr;
+      append_str(",", 1);
 
-    append_str("\"throughput_ops\":", 17);
-    ptr = std::to_chars(ptr, end, throughput_ops).ptr;
-    append_str(",", 1);
+      append_str("\"throughput_ops\":", 17);
+      ptr = std::to_chars(ptr, end, throughput_ops).ptr;
+      append_str(",", 1);
 
-    append_str("\"p50_latency_ns\":", 17);
-    ptr = std::to_chars(ptr, end, p50_ns).ptr;
-    append_str(",", 1);
+      append_str("\"p50_latency_ns\":", 17);
+      ptr = std::to_chars(ptr, end, p50_ns).ptr;
+      append_str(",", 1);
 
-    append_str("\"p99_latency_ns\":", 17);
-    ptr = std::to_chars(ptr, end, p99_ns).ptr;
-    append_str(",", 1);
+      append_str("\"p99_latency_ns\":", 17);
+      ptr = std::to_chars(ptr, end, p99_ns).ptr;
+      append_str(",", 1);
 
-    append_str("\"p999_latency_ns\":", 18);
-    ptr = std::to_chars(ptr, end, p999_ns).ptr;
-    append_str(",", 1);
+      append_str("\"p999_latency_ns\":", 18);
+      ptr = std::to_chars(ptr, end, p999_ns).ptr;
+      append_str(",", 1);
 
-    append_str("\"pool_used_objects\":", 20);
-    ptr = std::to_chars(ptr, end, pool_used).ptr;
-    append_str(",", 1);
+      append_str("\"pool_used_objects\":", 20);
+      ptr = std::to_chars(ptr, end, pool_used).ptr;
+      append_str(",", 1);
 
-    append_str("\"pool_peak_objects\":", 20);
-    ptr = std::to_chars(ptr, end, pool_peak).ptr;
-    append_str(",", 1);
+      append_str("\"pool_peak_objects\":", 20);
+      ptr = std::to_chars(ptr, end, pool_peak).ptr;
+      append_str(",", 1);
 
-    append_str("\"memory_pool_hit_rate\":", 23);
-    ptr =
-        std::to_chars(ptr, end, pool_hit_rate, std::chars_format::fixed, 4).ptr;
-    append_str(",", 1);
+      append_str("\"memory_pool_hit_rate\":", 23);
+      ptr = std::to_chars(ptr, end, pool_hit_rate, std::chars_format::fixed, 4)
+                .ptr;
+      append_str(",", 1);
 
-    append_str("\"ring_buffer_backpressure_events\":", 34);
-    ptr = std::to_chars(ptr, end, backpressure_events_).ptr;
+      append_str("\"ring_buffer_backpressure_events\":", 34);
+      ptr = std::to_chars(ptr, end, backpressure_events_).ptr;
 
-    append_str("}\n", 2);
+      append_str("}\n", 2);
 
-    std::size_t message_len = ptr - buffer;
-    std::cout.write(buffer, message_len);
+      std::size_t message_len = ptr - buffer;
+      std::cout.write(buffer, message_len);
+
+      std::cout.flush();
+    }
   }
 }
 
