@@ -87,27 +87,34 @@ graph TD
 
 ```
 
-### 1. Memory Architecture: Zero-Allocation Contiguous Object Pool
+### 1. Production Ingress: Concurrent Go Network Gateway
+
+A high-throughput, concurrent Go-based network subsystem natively handles socket connection scaling and custom wire protocols.
+
+* **Mechanism:** The gateway unpacks incoming line-wire CSV data directly into structured, cache-aligned `IngressPacket` objects. These objects are then streamed across process boundaries into a lock-free POSIX shared memory ring buffer (`/dev/shm/sequitur_shm`) mapped directly to the C++ core.
+* **Benefit:** Offloads all TCP/IP network stack processing, string parsing, and multiplexing overhead to Go's highly efficient goroutine scheduler, ensuring the C++ matching thread never blocks on I/O.
+
+### 2. Memory Architecture: Zero-Allocation Contiguous Object Pool
 
 A strictly pre-allocated, continuous memory arena designed to entirely bypass the operating system's heap manager (`malloc`/`new`) during active trading matching.
 
 * **Mechanism:** Maintains a contiguous array of `Order` structs and an embedded stack of free indices. Custom `acquire()` and `release()` methods recycle raw pointer addresses in deterministic $O(1)$ time.
 * **Benefit:** Completely eliminates heap fragmentation and runtime lock contention. The complete execution state fits perfectly within the CPU core's dedicated L1/L2 data cache regime, enabling 1 to 4 ns memory lookups.
 
-### 2. Concurrency Model: Single-Threaded, Shared-Nothing Monolithic Core
+### 3. Concurrency Model: Single-Threaded, Shared-Nothing Monolithic Core
 
 To protect the ultra-low latency execution path, the `MatchingEngine` and `OrderBook` operate on a single thread under a strict shared-nothing paradigm.
 
 * **Mechanism:** Core metrics like `total_trades` and `total_volume` utilize plain integer types. No mutexes, memory fences, or `std::atomic` variables exist within the matching loop structures.
 * **Benefit:** Bypasses all multi-threaded cache-line ownership fights. A single physical CPU core entirely owns the memory pool and double-linked list allocations, preventing instruction-level pipeline serialization stalls.
 
-### 3. Telemetry: Decoupled Out-of-Band Real-Time Metrics Pipeline
+### 4. Telemetry: Decoupled Out-of-Band Real-Time Metrics Pipeline
 
 Observability is entirely decoupled from the execution path using an asynchronous, non-blocking pipeline to extract real-time metrics without injecting measurement distortion or cache pollution into the engine.
 
 * **Engine Layer:** The matching core constructs a stack-allocated 64-byte `MetricsPacket` tracking engine states and raw cycle durations measured via assembly `rdtsc`. This packet is pushed out-of-band via a lock-free `SPSCQueue` using absolute distance index calculations, keeping the active telemetry tax at a flat **0.00 ns** on the trading thread.
-* **Ingress Layer:** A background `MetricsWorker` thread consumes the queue on an independent core, flattening the structures into a structured JSON entry string, streaming them directly into `/dev/shm/sequitur/telemetry.log` (a Linux memory-resident RAM disk) to guarantee zero physical disk I/O blocking.
-* **Aggregation & Visualization Layer:** A local `Vector` data agent leverages `inotify` watches to stream the appended JSON lines instantly into a `Grafana Loki` instance. Invalid non-JSON startup/shutdown lines are intercepted and dropped at the Vector VRL remapping tier to ensure deterministic parsing. `Grafana` consumes the Loki data source to render sub-microsecond latency distributions (P50, P99, P99.9), memory allocation bounds, and throughput timelines live in production.
+* **Ingress Layer:** A background `MetricsWorker` thread consumes the queue on an independent core. To eliminate heavy runtime data choke, the loop aggregates processing samples over a strict **250ms minimum reporting interval**. When the interval opens, it flattens the counters into a structured JSON string using zero-allocation `std::to_chars` string formatting, writing directly into `/dev/shm/sequitur/telemetry.log` (a Linux memory-resident RAM disk) to guarantee zero physical disk I/O blocking.
+* **Aggregation & Visualization Layer:** A local `Vector` data agent leverages `inotify` watches to stream the appended JSON lines instantly into a `Grafana Loki` instance. Invalid non-JSON lines are dropped at the Vector VRL remapping tier, which implements robust parenthetical null-coalescing operations to guarantee deterministic schema generation. `Grafana` consumes the Loki data source via a high-capacity dynamic directory provider volume mount to render sub-microsecond latency distributions (P50, P99), memory allocation bounds, and throughput timelines live in production.
 
 ---
 
@@ -136,10 +143,10 @@ cmake --build . --target unit_tests
 
 The entire infrastructure stack—including Docker containers, log clearouts, Vector data stream states, and the performance-isolated simulation engine loop—is fully automated via a single root orchestrator script.
 
-To launch the unified pipeline, execute the following command from the project root:
+To launch the unified, end-to-end network pipeline infrastructure, execute the following command from the project root:
 
 ```bash
-sudo ./run_pipeline.sh
+./run_n2n.sh
 
 ```
 
@@ -147,11 +154,14 @@ sudo ./run_pipeline.sh
 
 The orchestration script manages the system state sequentially to ensure no race conditions occur during system initialization:
 
-1. **Privilege Validation:** Asserts the shell session contains root execution access, preventing failure when requesting scheduling overrides.
-2. **RAM Disk Allocation:** Pre-allocates and clears out the memory-backed file descriptor path inside `/dev/shm/sequitur/` to establish zero-I/O streaming bounds.
-3. **Container Infrastructure Initialization:** Launches the underlying `Loki` and `Grafana` container virtualization layer in detached mode (`-d`).
-4. **Telemetry Agent Reset:** Kills any orphaned logging agents, purges the local checkpoint cache tracking directory (`.vector_data/`), and spawns the `Vector` logging service attached to the local `vector.toml` layout guidelines.
-5. **Hyper-Thread Isolated Loop Execution:** Pins the compiled executable context to **Physical CPU Core 3** via `taskset -c 3` and updates the process scheduling model to the maximum Linux Real-Time FIFO priority (`chrt -f 99`). This locks out the standard kernel thread manager, keeping the execution path un-preempted by background system tasks.
+1. **Environment Purge:** Aggressively terminates any legacy engine processes, tears down existing telemetry paths, and removes stale POSIX shared memory handles.
+2. **RAM Disk Allocation:** Re-initializes clean memory-backed file descriptor structures inside `/dev/shm/sequitur/` to establish zero-I/O streaming bounds.
+3. **Container Infrastructure Initialization:** Launches the underlying `Loki` and `Grafana` multi-container virtualization layer in detached mode (`-d`).
+4. **Telemetry Agent Reset & Mount:** Clears local tracking databases, syncs the custom `vector.toml` properties, and spawns the telemetry daemon.
+5. **Gateway Network Ingress:** Activates the high-throughput Go network gateway on port `:8080`, building the lock-free shared memory tracking map.
+6. **RAM Protection Sentinel Loop:** Launches a non-blocking background shell sentinel that monitors the shared memory log file size, executing an instant, atomic `truncate` operation if the payload breaches a strict 10MB limit.
+7. **Hyper-Thread Isolated Core Execution:** Pins the matching executable context across physical **CPU Cores 3 and 4** via `taskset` and elevates execution to maximum Linux Real-Time FIFO priority (`chrt -f 99`) to shield the hot path from scheduler drift.
+8. **Client Traffic Injection Framework:** Synchronously invokes a continuous market client traffic script to feed live multi-packet order streams through the networking boundaries.
 
 Once the script displays that the pipeline is active, navigate your browser to `http://localhost:3000` to view the **Sequitur Real-Time Hardware Performance Monitor** live. To shut down the simulation and safely pull down all container networks, send an interrupt signal (**`Ctrl + C`**) to the running script window.
 
@@ -159,5 +169,4 @@ Once the script displays that the pipeline is active, navigate your browser to `
 
 ## Engineering Roadmap and Future Extensions
 
-* **Phase 5: Go Network Gateway Integration (Production Ingress):** Integration of a high-throughput, concurrent Go-based network subsystem. The Go layer natively handles extreme socket connection scaling and custom wire protocols, directly unpacking line-wire data to stream raw, structured ingress objects across the boundary ring buffer to the C++ core.
 * **Hardware Acceleration Interfacing:** Investigating hardware-offloaded network ingestion layers (such as a DPDK kernel bypass or an FPGA network tap) to apply sub-nanosecond wire timestamps directly to incoming packets before handing them off to the Go processing ring.
