@@ -42,6 +42,8 @@ def stream_market_traffic(host="127.0.0.1", port=8080, batch_size=1000):
 
             sock.sendall(payload_buffer)
             sent_count += batch_size * 2
+
+            # Micro-sleep to preserve execution pacing without overwhelming network buffers
             time.sleep(0.001)
 
     except KeyboardInterrupt:
