@@ -1,31 +1,46 @@
-version: "3.8"
-
 services:
+  vector:
+    image: timberio/vector:latest-alpine
+    container_name: sequitur-vector-1
+    restart: unless-stopped
+    command: ["--config", "/etc/vector/vector.toml"]
+    volumes:
+      - /dev/shm/sequitur:/dev/shm/sequitur:ro
+      - ./vector.toml:/etc/vector/vector.toml:ro
+    networks:
+      - telemetry
+    depends_on:
+      - loki
+
   loki:
     image: grafana/loki:2.9.0
     container_name: sequitur-loki-1
+    restart: unless-stopped
     ports:
       - "3100:3100"
-    command: -config.file=/etc/loki/local-config.yaml
+    command: >
+      -config.file=/etc/loki/local-config.yaml
+      -distributor.ingestion-rate-limit-mb=100
+      -distributor.ingestion-burst-size-mb=200
     networks:
       - telemetry
 
   grafana:
     image: grafana/grafana:10.2.0
     container_name: sequitur-grafana-1
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
       - GF_SECURITY_ADMIN_PASSWORD=admin
     volumes:
-      # Automatically register Loki as the default data source inside Grafana on startup
       - ./grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
-      # Automatically configure Grafana to watch local directory targets for dashboard templates
       - ./grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml
-      # Inject your specific Sequitur Performance Monitor JSON blueprint into the watched directory
-      - ./sequitur_dashboard.json:/var/lib/grafana/dashboards/sequitur_dashboard.json
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
     networks:
       - telemetry
+    depends_on:
+      - loki
 
 networks:
   telemetry:

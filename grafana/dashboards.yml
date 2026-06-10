@@ -2,7 +2,7 @@ apiVersion: 1
 providers:
   - name: 'Sequitur Automated Provider'
     orgId: 1
-    folder: ''
+    folder: 'Sequitur Engine HFT'
     type: file
     disableDeletion: false
     editable: true

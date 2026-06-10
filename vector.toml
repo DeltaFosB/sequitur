@@ -1,38 +1,57 @@
-# Global settings configuration
-data_dir = "./.vector_data"  # Forces Vector to store metadata locally in user-space
+# ==============================================================================
+# 1. Global Configuration Layer (Strictly at the absolute top of the file)
+# ==============================================================================
+data_dir = "/tmp"
 
+# ==============================================================================
+# 2. Ingress Infrastructure Sources
+# ==============================================================================
 [sources.sequitur_logs]
 type = "file"
 include = ["/dev/shm/sequitur/telemetry.log"]
-read_from = "end"
+read_from = "beginning"
 
+# ==============================================================================
+# 3. Stream Transformation Pipelines
+# ==============================================================================
 [transforms.parse_json]
 type = "remap"
 inputs = ["sequitur_logs"]
 source = """
-# 1. Drop non-JSON auxiliary lines safely before parsing
+# 1. Instantly drop auxiliary lines or unformed text chunks
 if !starts_with(string!(.message), "{") {
     abort
 }
 
-# 2. Parse the verified JSON transaction line safely
+# 2. Extract the high-velocity JSON properties safely
 parsed, err = parse_json(.message)
 if err != null {
     abort
 }
 
-# 3. Use the bang operator to handle object merging infallibly
+# 3. Flatten the event context payload
 . = merge!(., parsed)
+del(.message)
+del(.file)
+del(.host)
 
-# 4. Handle metric target naming using infallible string coercion
-.metric_name = "sequitur_" + string(.latency_scope) ?? "unknown_scope"
+# 4. FIXED: Parentheses guarantee safe string concatenation fallbacks
+.metric_name = "sequitur_" + (string(.latency_scope) ?? "unknown_scope")
 """
 
-# Destination Sink: Route directly to your local Loki container
+# ==============================================================================
+# 4. Egress Storage Sinks
+# ==============================================================================
 [sinks.grafana_loki]
 type = "loki"
 inputs = ["parse_json"]
-endpoint = "http://localhost:3100"
+endpoint = "http://loki:3100"
 encoding.codec = "json"
-labels.app = "sequitur_engine"
-labels.clock_source = "{{ clock_source }}"
+
+# FORCE LOW-LATENCY FLUSHES FOR REAL-TIME MONITORING
+[sinks.grafana_loki.batch]
+max_bytes = 1048576      # Flush instantly at 1MB capacity
+timeout_secs = 1         # Force chunk transmission every 1 second maximum
+
+[sinks.grafana_loki.labels]
+app = "sequitur_engine"

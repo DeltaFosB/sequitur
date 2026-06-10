@@ -32,14 +32,14 @@
         {
           "datasource": { "type": "loki" },
           "editorMode": "code",
-          "expr": "sum by (app) (last_over_time({app=\"sequitur_engine\"} | json | unwrap total_orders [1m]))",
+          "expr": "sum by (app) (max_over_time({app=\"sequitur_engine\"} | json | unwrap total_orders [1m]))",
           "legendFormat": "Total Orders Handled",
           "queryType": "range"
         },
         {
           "datasource": { "type": "loki" },
           "editorMode": "code",
-          "expr": "sum by (app) (last_over_time({app=\"sequitur_engine\"} | json | unwrap total_trades [1m]))",
+          "expr": "sum by (app) (max_over_time({app=\"sequitur_engine\"} | json | unwrap total_trades [1m]))",
           "legendFormat": "Total Matching Trades",
           "queryType": "range"
         }
@@ -91,5 +91,5 @@
   "uid": "sequitur-hft-monitor",
   "time": { "from": "now-5m", "to": "now" },
   "timepicker": { "refresh_intervals": ["100ms", "500ms", "1s"] },
-  "version": 1
+  "version": 2
 }
