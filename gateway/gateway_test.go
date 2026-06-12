@@ -14,12 +14,18 @@ func TestGatewayIntegration(t *testing.T) {
 	// 1. Setup isolated, in-memory SharedMemory spaces to prevent production /dev/shm pollution
 	backingBuffer := make([]byte, totalSize)
 	var shm SharedMemory
-	shm.read_idx = (*int64)(unsafe.Pointer(&backingBuffer[0]))
-	shm.write_idx = (*int64)(unsafe.Pointer(&backingBuffer[8]))
-	shm.buffer = uintptr(unsafe.Pointer(&backingBuffer[16]))
+	shm.ingress_read_idx = (*int64)(unsafe.Pointer(&backingBuffer[0]))
+	shm.ingress_write_idx = (*int64)(unsafe.Pointer(&backingBuffer[8]))
+	shm.egress_read_idx = (*int64)(unsafe.Pointer(&backingBuffer[16]))
+	shm.egress_write_idx = (*int64)(unsafe.Pointer(&backingBuffer[24]))
 
-	atomic.StoreInt64(shm.read_idx, 0)
-	atomic.StoreInt64(shm.write_idx, 0)
+	shm.ingress_buffer = uintptr(unsafe.Pointer(&backingBuffer[32]))
+	shm.egress_buffer = uintptr(unsafe.Pointer(&backingBuffer[32+ingressPacketsSize]))
+
+	atomic.StoreInt64(shm.ingress_read_idx, 0)
+	atomic.StoreInt64(shm.ingress_write_idx, 0)
+	atomic.StoreInt64(shm.egress_read_idx, 0)
+	atomic.StoreInt64(shm.egress_write_idx, 0)
 
 	packetChan := make(chan IngressPacket, 1024)
 
@@ -35,8 +41,8 @@ func TestGatewayIntegration(t *testing.T) {
 	// that continuously clears the read index so our Enqueue checks never hit a full wall.
 	go func() {
 		for {
-			currWrite := atomic.LoadInt64(shm.write_idx)
-			atomic.StoreInt64(shm.read_idx, currWrite)
+			currWrite := atomic.LoadInt64(shm.ingress_write_idx)
+			atomic.StoreInt64(shm.ingress_read_idx, currWrite)
 			time.Sleep(10 * time.Microsecond)
 		}
 	}()
@@ -49,10 +55,11 @@ func TestGatewayIntegration(t *testing.T) {
 	const packetsPerClient = 100
 	var wg sync.WaitGroup
 
+	// TraderID is set to 5002 here; HandleClient will bind this socket context to key 5002
 	mockCSVRow := "1,2,1005,5002,10,150450,999101\n"
 
 	// 5. Spawn the concurrent client fleet
-	for clientID := range numClients {
+	for clientID := 0; clientID < numClients; clientID++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -66,7 +73,7 @@ func TestGatewayIntegration(t *testing.T) {
 			defer conn.Close()
 
 			// Stream packets as fast as the network interface can ingest them
-			for range packetsPerClient {
+			for i := 0; i < packetsPerClient; i++ {
 				_, err := fmt.Fprint(conn, mockCSVRow)
 				if err != nil {
 					t.Errorf("Client %d failed to write packet: %v", id, err)
@@ -87,7 +94,7 @@ func TestGatewayIntegration(t *testing.T) {
 
 	// 7. Core Invariant Check: Verify total multiplexed processing volume
 	expectedTotal := int64(numClients * packetsPerClient)
-	finalProcessed := atomic.LoadInt64(shm.write_idx)
+	finalProcessed := atomic.LoadInt64(shm.ingress_write_idx)
 
 	if finalProcessed != expectedTotal {
 		t.Errorf("Concurrency processing failure! Expected total packets in shared memory to be %d, but got %d", expectedTotal, finalProcessed)
@@ -98,20 +105,26 @@ func BenchmarkGatewayIntegration(b *testing.B) {
 	// 1. Setup sandboxed, in-memory SharedMemory tracking
 	backingBuffer := make([]byte, totalSize)
 	var shm SharedMemory
-	shm.read_idx = (*int64)(unsafe.Pointer(&backingBuffer[0]))
-	shm.write_idx = (*int64)(unsafe.Pointer(&backingBuffer[8]))
-	shm.buffer = uintptr(unsafe.Pointer(&backingBuffer[16]))
+	shm.ingress_read_idx = (*int64)(unsafe.Pointer(&backingBuffer[0]))
+	shm.ingress_write_idx = (*int64)(unsafe.Pointer(&backingBuffer[8]))
+	shm.egress_read_idx = (*int64)(unsafe.Pointer(&backingBuffer[16]))
+	shm.egress_write_idx = (*int64)(unsafe.Pointer(&backingBuffer[24]))
 
-	atomic.StoreInt64(shm.read_idx, 0)
-	atomic.StoreInt64(shm.write_idx, 0)
+	shm.ingress_buffer = uintptr(unsafe.Pointer(&backingBuffer[32]))
+	shm.egress_buffer = uintptr(unsafe.Pointer(&backingBuffer[32+ingressPacketsSize]))
+
+	atomic.StoreInt64(shm.ingress_read_idx, 0)
+	atomic.StoreInt64(shm.ingress_write_idx, 0)
+	atomic.StoreInt64(shm.egress_read_idx, 0)
+	atomic.StoreInt64(shm.egress_write_idx, 0)
 
 	packetChan := make(chan IngressPacket, 4096)
 
 	// Keep shared memory cleared so the gateway never hits a full buffer block
 	go func() {
 		for {
-			currWrite := atomic.LoadInt64(shm.write_idx)
-			atomic.StoreInt64(shm.read_idx, currWrite)
+			currWrite := atomic.LoadInt64(shm.ingress_write_idx)
+			atomic.StoreInt64(shm.ingress_read_idx, currWrite)
 		}
 	}()
 

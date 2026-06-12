@@ -5,7 +5,7 @@ import (
 	"unsafe"
 )
 
-func TestStructAlignment(t *testing.T) {
+func TestIngressStructAlignment(t *testing.T) {
 	var p IngressPacket
 
 	// 1. Assert overall data slot layout is exactly 32 bytes
@@ -37,6 +37,50 @@ func TestStructAlignment(t *testing.T) {
 	}
 	if unsafe.Offsetof(p.ClientOrderID) != 24 {
 		t.Errorf("ClientOrderID offset mismatch: expected 24, got %d", unsafe.Offsetof(p.ClientOrderID))
+	}
+}
+
+func TestEgressStructAlignment(t *testing.T) {
+	var e EgressPacket
+
+	// Assert overall data slot layout is exactly 64 bytes matching C++ cache-line target
+	if unsafe.Sizeof(e) != 64 {
+		t.Fatalf("EgressPacket overall size mismatch: expected 64 bytes, got %d", unsafe.Sizeof(e))
+	}
+
+	// Assert precise byte offsets to verify no compilation padding holes exist
+	if unsafe.Offsetof(e.Type) != 0 {
+		t.Errorf("Type offset mismatch: expected 0, got %d", unsafe.Offsetof(e.Type))
+	}
+	if unsafe.Offsetof(e.Side) != 1 {
+		t.Errorf("Side offset mismatch: expected 1, got %d", unsafe.Offsetof(e.Side))
+	}
+	if unsafe.Offsetof(e.Padding16) != 2 {
+		t.Errorf("Padding16 offset mismatch: expected 2, got %d", unsafe.Offsetof(e.Padding16))
+	}
+	if unsafe.Offsetof(e.InstrumentID) != 4 {
+		t.Errorf("InstrumentID offset mismatch: expected 4, got %d", unsafe.Offsetof(e.InstrumentID))
+	}
+	if unsafe.Offsetof(e.ClientOrderID) != 8 {
+		t.Errorf("ClientOrderID offset mismatch: expected 8, got %d", unsafe.Offsetof(e.ClientOrderID))
+	}
+	if unsafe.Offsetof(e.MakerID) != 16 {
+		t.Errorf("MakerID offset mismatch: expected 16, got %d", unsafe.Offsetof(e.MakerID))
+	}
+	if unsafe.Offsetof(e.TakerID) != 24 {
+		t.Errorf("TakerID offset mismatch: expected 24, got %d", unsafe.Offsetof(e.TakerID))
+	}
+	if unsafe.Offsetof(e.MatchPrice) != 32 {
+		t.Errorf("MatchPrice offset mismatch: expected 32, got %d", unsafe.Offsetof(e.MatchPrice))
+	}
+	if unsafe.Offsetof(e.MatchQuantity) != 40 {
+		t.Errorf("MatchQuantity offset mismatch: expected 40, got %d", unsafe.Offsetof(e.MatchQuantity))
+	}
+	if unsafe.Offsetof(e.LeavesQuantity) != 44 {
+		t.Errorf("LeavesQuantity offset mismatch: expected 44, got %d", unsafe.Offsetof(e.LeavesQuantity))
+	}
+	if unsafe.Offsetof(e.Padding) != 48 {
+		t.Errorf("Padding array offset mismatch: expected 48, got %d", unsafe.Offsetof(e.Padding))
 	}
 }
 

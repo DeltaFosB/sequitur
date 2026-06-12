@@ -48,14 +48,14 @@ sleep 0.5
 if [ -f "/dev/shm/sequitur_shm" ]; then
     echo -e "${GREEN}✓ Virtual file successfully mounted in /dev/shm/sequitur_shm${NC}"
     
-    # Capture and verify file size (expected size: 32784 bytes)
+    # Capture and verify file size (expected size: 6291488 bytes)
     FILE_SIZE=$(stat -c%s "/dev/shm/sequitur_shm")
     echo -e "Shared Memory Segment Allocated Size: ${FILE_SIZE} bytes"
     
-    if [ "$FILE_SIZE" -eq 32784 ]; then
+    if [ "$FILE_SIZE" -eq 6291488 ]; then
         echo -e "${GREEN}✓ Shared memory allocation size aligns perfectly with 32KB boundary!${NC}"
     else
-        echo -e "${RED}✗ Size mismatch! Expected 32784 bytes, got ${FILE_SIZE}${NC}"
+        echo -e "${RED}✗ Size mismatch! Expected 6291488 bytes, got ${FILE_SIZE}${NC}"
         kill $GATEWAY_PID
         exit 1
     fi
