@@ -30,7 +30,7 @@ The table below documents the empirical evolution of Sequitur's architectural pe
 
 | Telemetry Phase / Layout | Mean Round-Trip | P99 Tail Latency | Tracking Footprint | Hardware Jitter ($\sigma$) | Micro-Architectural Trade-off & Observation |
 | --- | --- | --- | --- | --- | --- |
-| **Decoupled SPSC Pipeline** | **15.71 ns** | **18.20 ns** | **64 Bytes / Packet** | **1.00 ns** | **Production Baseline.** Telemetry is deferred out-of-band via a lock-free SPSC queue. CPU pipeline lookahead is maximized. |
+| **Decoupled Bidirectional Pipeline** | **15.71 ns** | **18.20 ns** | **32B Ingress / 64B Egress** | **1.00 ns** | **Production Baseline.** Telemetry and execution reports are deferred out-of-band via lock-free rings. |
 | **Macro-Bucket Partitioning** | 23.53 ns | 25.60 ns | 8 KB | 1.51 ns | Monolithic baseline with out-of-band macro-timing. Opens compiler loop vectorization options. |
 | **Atomic-Bound OrderBook** | 32.46 ns | 36.44 ns | 8 KB | 7.82 ns | Implements relaxed atomics inside the hot path. Forces hardware instruction taxes via Read-Modify-Write (RMW) cycle pipeline bubbles. |
 | **Individual Vector Tracking** | 39.95 ns | 62.41 ns | 8 MB | 3.44 ns | Suffers severe data cache thrashing. The massive 8MB telemetry array continuously evicts active order book nodes to RAM. |
@@ -44,11 +44,11 @@ By implementing an automated hardware profiling suite via low-level kernel diagn
 
 #### Hypothesis 1: The Multi-Threaded Cache-Line Bouncing Trap (False Sharing)
 
-Our baseline atomic tracking test added a mandatory **8.5 ns penalty** on a single isolated core. Had this memory footprint been accessed concurrently by an external gateway or publisher thread, the hardware cache coherency protocol (MESI) would have triggered a continuous stream of cache invalidations. This would cause the shared 64-byte cache lines to bounce across CPU sockets, crashing matching loop throughput straight into the 150+ ns range. Shifting to an asymmetric `SPSCQueue` layout with `alignas(64)` padding on internal read/write pointers permanently shields Core 3 from Core 4's cache line polling.
+Our baseline atomic tracking test added a mandatory **8.5 ns penalty** on a single isolated core. Had this memory footprint been accessed concurrently by an external gateway or publisher thread, the hardware cache coherency protocol (MESI) would have triggered a continuous stream of cache invalidations. This would cause the shared 64-byte cache lines to bounce across CPU sockets, crashing matching loop throughput straight into the 150+ ns range. Shifting to an asymmetric layout with `alignas(64)` padding on internal read/write pointers permanently shields Core 3 from Core 4's cache line polling.
 
 #### Hypothesis 2: Microscopic Instrumentation vs. Pipeline Freedom
 
-Placing high-resolution clock reads directly around individual order submissions injects an incompressible 30–36 ns vDSO clock read tax. Furthermore, these timekeeping wrappers act as a rigid serialization barrier, halting the CPU's **Out-of-Order (OoO) execution engine**. Passing telemetry asynchronous `MetricsPacket` chunks via lock-free rings drops the active telemetry tax to a negligible **0.00 ns inside the engine block**, leaving the hardware pipeline completely free to optimize loop math, maximize register re-use, and apply loop unrolling.
+Placing high-resolution clock reads directly around individual order submissions injects an incompressible 30–36 ns vDSO clock read tax. Furthermore, these timekeeping wrappers act as a rigid serialization barrier, halting the CPU's **Out-of-Order (OoO) execution engine**. Passing telemetry asynchronous chunks via lock-free rings drops the active telemetry tax to a negligible **0.00 ns inside the engine block**, leaving the hardware pipeline completely free to optimize loop math, maximize register re-use, and apply loop unrolling.
 
 #### Hypothesis 3: The Cold Start Tax (First-Touch Page Fault Boundary)
 
@@ -63,18 +63,24 @@ graph TD
     Client((Market Client)) -->|Line Wire Data| GoGateway[Go Network Subsystem]
     
     subgraph "Concurrency Bridge (Inter-Process / Inter-Thread)"
-        GoGateway -->|Direct Protocol Unpacking| RingBuffer{Bounded Ring Buffer}
+        GoGateway -->|Direct Protocol Unpacking| IngressRing{Bounded Ingress Ring}
+        EgressRing{Bounded Egress Ring} -->|Async Dequeue Distribution| GoGateway
     end
     
     subgraph "Deterministic Core (Single Thread - Isolated Core 3)"
-        RingBuffer -->|Zero-Lock Zero-Copy Pop| Engine[Matching Engine]
+        IngressRing -->|Zero-Lock Zero-Copy Pop| Engine[Matching Engine]
         Engine -->|O1 Acquire| Pool[Contiguous Object Pool]
         Engine -->|Price-Time Match| Book[Order Book]
         Book -->|Double-Linked Update| Matrix[Array Price Matrix]
+        Engine -->|Zero-Copy Push Execution Report| EgressQueue{SPSC Egress Queue}
+    end
+
+    subgraph "Asynchronous Egress Pipeline (Core 3 Publisher Thread)"
+        EgressQueue -->|Lock-Free Pop| EgressRing
     end
     
     subgraph "Asynchronous Telemetry Pipeline"
-        Engine -->|Push Telemetry Packet| MetricsQueue{SPSC Metrics Queue}
+        Engine -->|Thread-Local Reg Accumulate| MetricsQueue{SPSC Metrics Queue}
         MetricsQueue -.->|Zero-Copy Pop Reference| MetricsWorker[Metrics Worker Thread]
         MetricsWorker -->|Structured JSON via RAM Disk| Vector[Vector Telemetry Agent]
         Vector -->|Real-Time Non-Blocking Ingress| Loki[Grafana Loki Container]
@@ -85,14 +91,16 @@ graph TD
         Matrix -.->|Warm L1/L2 Cache Locality| CPU[Isolated Physical Silicon]
     end
 
+    %% Structural layout constraints to force vertical alignment of the decoupled pipelines
+    EgressRing ~~~ MetricsQueue
 ```
 
-### 1. Production Ingress: Concurrent Go Network Gateway
+### 1. Production Ingress & Egress: Bidirectional Go Network Gateway
 
-A high-throughput, concurrent Go-based network subsystem natively handles socket connection scaling and custom wire protocols.
+A high-throughput, concurrent Go-based network subsystem natively handles socket connection scaling, dynamic client registration, and custom wire protocols.
 
-* **Mechanism:** The gateway unpacks incoming line-wire CSV data directly into structured, cache-aligned `IngressPacket` objects. These objects are then streamed across process boundaries into a lock-free POSIX shared memory ring buffer (`/dev/shm/sequitur_shm`) mapped directly to the C++ core.
-* **Benefit:** Offloads all TCP/IP network stack processing, string parsing, and multiplexing overhead to Go's highly efficient goroutine scheduler, ensuring the C++ matching thread never blocks on I/O.
+* **Mechanism:** The gateway unpacks incoming line-wire CSV data directly into structured, cache-aligned `IngressPacket` structures and transfers them via a lock-free POSIX shared memory ring buffer (`/dev/shm/sequitur_shm`) mapped directly to the C++ core. Concurrently, a dedicated egress thread pulls 64-byte `EgressPacket` structures from a separate shared memory ring buffer segment, formats them into execution strings, and performs non-blocking lookups against an active connection registry map to distribute trade fills back to clients.
+* **Benefit:** Offloads all TCP/IP network stack processing, string formatting, client multiplexing, and systemic socket I/O blockages to Go's highly efficient goroutine scheduler, keeping the C++ matching execution loop isolated.
 
 ### 2. Memory Architecture: Zero-Allocation Contiguous Object Pool
 
@@ -112,7 +120,7 @@ To protect the ultra-low latency execution path, the `MatchingEngine` and `Order
 
 Observability is entirely decoupled from the execution path using an asynchronous, non-blocking pipeline to extract real-time metrics without injecting measurement distortion or cache pollution into the engine.
 
-* **Engine Layer:** The matching core constructs a stack-allocated 64-byte `MetricsPacket` tracking engine states and raw cycle durations measured via assembly `rdtsc`. This packet is pushed out-of-band via a lock-free `SPSCQueue` using absolute distance index calculations, keeping the active telemetry tax at a flat **0.00 ns** on the trading thread.
+* **Engine Layer:** The matching core increments trading statistics and tracks raw cycle durations via assembly `rdtsc` entirely within thread-local registers. To eliminate cross-core L3 cache bus invalidations, the core buffers these counts and only pushes a single aggregated `MetricsPacket` snapshot down to a lock-free `SPSCQueue` once every 1,024 orders. This macro-batch window drops data bus contention by 99.9% while keeping the active telemetry tax at a flat **0.00 ns** across the hot trading loop.
 * **Ingress Layer:** A background `MetricsWorker` thread consumes the queue on an independent core. To eliminate heavy runtime data choke, the loop aggregates processing samples over a strict **250ms minimum reporting interval**. When the interval opens, it flattens the counters into a structured JSON string using zero-allocation `std::to_chars` string formatting, writing directly into `/dev/shm/sequitur/telemetry.log` (a Linux memory-resident RAM disk) to guarantee zero physical disk I/O blocking.
 * **Aggregation & Visualization Layer:** A local `Vector` data agent leverages `inotify` watches to stream the appended JSON lines instantly into a `Grafana Loki` instance. Invalid non-JSON lines are dropped at the Vector VRL remapping tier, which implements robust parenthetical null-coalescing operations to guarantee deterministic schema generation. `Grafana` consumes the Loki data source via a high-capacity dynamic directory provider volume mount to render sub-microsecond latency distributions (P50, P99), memory allocation bounds, and throughput timelines live in production.
 
@@ -169,4 +177,5 @@ Once the script displays that the pipeline is active, navigate your browser to `
 
 ## Engineering Roadmap and Future Extensions
 
+* **Zero-Copy Network Ingress Batching:** Moving the Go Gateway layer from sequential newline string processing (`ReadString('\n')`) to chunked block-buffer slice reads to eliminate dynamic heap allocations and maximize networked processing throughput.
 * **Hardware Acceleration Interfacing:** Investigating hardware-offloaded network ingestion layers (such as a DPDK kernel bypass or an FPGA network tap) to apply sub-nanosecond wire timestamps directly to incoming packets before handing them off to the Go processing ring.
