@@ -7,29 +7,53 @@ import (
 	"sync"
 )
 
+type clientState struct {
+	conn net.Conn
+	ch   chan []byte
+}
+
 var (
-	clientRegistry = make(map[uint32]net.Conn)
+	clientRegistry = make(map[uint32]*clientState)
 	registryMutex  sync.RWMutex
 )
 
 func HandleClient(conn net.Conn, packetChan chan<- IngressPacket) {
-	defer conn.Close()
 	reader := bufio.NewReader(conn)
-	var assignedTraderID uint32 = 0
-	var registered bool
+
+	localSessionTraders := make(map[uint32]struct{})
+
+	state := &clientState{
+		conn: conn,
+		ch:   make(chan []byte, 65536),
+	}
+
+	go func(cs *clientState) {
+		for payload := range cs.ch {
+			_, err := cs.conn.Write(payload)
+			if err != nil {
+				return
+			}
+		}
+	}(state)
+
+	defer func() {
+		conn.Close()
+		registryMutex.Lock()
+
+		for traderID := range localSessionTraders {
+			delete(clientRegistry, traderID)
+		}
+		close(state.ch)
+
+		registryMutex.Unlock()
+		fmt.Printf("Connection terminated. Unregistered bound traders: %v\n", localSessionTraders)
+	}()
 
 	for {
 		message, err := reader.ReadString('\n')
 		if err != nil {
-			if registered {
-				registryMutex.Lock()
-				delete(clientRegistry, assignedTraderID)
-				registryMutex.Unlock()
-			}
-			fmt.Println("Client Disconnected.")
 			return
 		}
-		// fmt.Println("Received: ", message)
 
 		var packet IngressPacket
 		err = packet.ParseCSV(message)
@@ -38,12 +62,15 @@ func HandleClient(conn net.Conn, packetChan chan<- IngressPacket) {
 			continue
 		}
 
-		if !registered {
-			assignedTraderID = packet.TraderID
+		traderID := packet.TraderID
+		if _, exists := localSessionTraders[traderID]; !exists {
+			localSessionTraders[traderID] = struct{}{}
+
 			registryMutex.Lock()
-			clientRegistry[assignedTraderID] = conn
+			clientRegistry[traderID] = state
 			registryMutex.Unlock()
-			registered = true
+
+			fmt.Printf("Trader %d dynamically registered and bound to active session.\n", traderID)
 		}
 
 		packetChan <- packet
@@ -60,13 +87,12 @@ func ServeGateway(listener net.Listener, shm *SharedMemory, packetChan chan Ingr
 		}
 	}()
 
-	// 2. NEW: Egress Distribution Engine Thread Loop
+	// 2. Egress Distribution Engine Thread Loop (Fully Decoupled)
 	go func() {
 		for {
 			packet, hasData := shm.Dequeue()
 			if !hasData {
 				// Ring buffer empty; let the thread cooperatively yield
-				// Using a tight spin override option for sub-microsecond delivery
 				continue
 			}
 
@@ -75,16 +101,26 @@ func ServeGateway(listener net.Listener, shm *SharedMemory, packetChan chan Ingr
 				packet.ClientOrderID, packet.MatchPrice, packet.MatchQuantity)
 			payload := []byte(reportStr)
 
-			// Route to the Aggressive Taker if they are connected to this gateway instance
-			if takerConn, exists := clientRegistry[uint32(packet.TakerID)]; exists {
-				_, _ = takerConn.Write(payload)
+			registryMutex.RLock()
+
+			// Route to the Aggressive Taker asynchronously via non-blocking select channel drops
+			if takerState, exists := clientRegistry[uint32(packet.TakerID)]; exists {
+				select {
+				case takerState.ch <- payload:
+				default:
+					// Prevents a bottlenecked client socket from stalling the global pipeline
+				}
 			}
 
-			// Route to the Passive Maker if they are connected to this gateway instance
-			if makerConn, exists := clientRegistry[uint32(packet.MakerID)]; exists {
-				_, _ = makerConn.Write(payload)
+			// Route to the Passive Maker asynchronously via non-blocking select channel drops
+			if makerState, exists := clientRegistry[uint32(packet.MakerID)]; exists {
+				select {
+				case makerState.ch <- payload:
+				default:
+				}
 			}
 
+			registryMutex.RUnlock()
 		}
 	}()
 
