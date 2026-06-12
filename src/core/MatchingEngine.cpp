@@ -3,12 +3,12 @@
 namespace sequitur {
 namespace core {
 
-void MatchingEngine::submit_order(uint8_t side, uint64_t price,
-                                  uint32_t quantity) {
+bool MatchingEngine::submit_order(uint8_t side, uint64_t price,
+                                  uint32_t quantity, uint32_t trader_id) {
   Order *order = pool.acquire();
 
   if (order == nullptr) [[unlikely]] {
-    return;
+    return false;
   }
 
   total_orders++;
@@ -16,6 +16,7 @@ void MatchingEngine::submit_order(uint8_t side, uint64_t price,
   order->side = side;
   order->price = price;
   order->quantity = quantity;
+  order->trader_id = trader_id;
   order->id = next_order_id++;
 
   book->match_order(order, exec_q, trash_q);
@@ -28,7 +29,8 @@ void MatchingEngine::submit_order(uint8_t side, uint64_t price,
   if (order->quantity == 0) {
     pool.release(order);
   }
-  exec_q.clear();
+
+  return true;
 }
 } // namespace core
 } // namespace sequitur

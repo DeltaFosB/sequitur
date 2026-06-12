@@ -24,7 +24,11 @@ public:
 
   ~MatchingEngine() = default;
 
-  void submit_order(uint8_t side, uint64_t price, uint32_t quantity);
+  bool submit_order(uint8_t side, uint64_t price, uint32_t quantity,
+                    uint32_t trader_id);
+
+  const ExecutionQueue &get_execution_queue() const noexcept { return exec_q; }
+  void clear_execution_queue() noexcept { exec_q.clear(); }
 
   uint64_t get_total_orders() const { return total_orders; }
   uint64_t get_total_trades() const { return book->get_total_trades(); }

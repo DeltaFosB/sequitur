@@ -88,8 +88,8 @@ public:
         total_trades++;
         total_volume += trade_quantity;
 
-        exec_q.push(
-            {resting->id, incoming->id, resting->price, trade_quantity});
+        exec_q.push({resting->trader_id, incoming->trader_id, resting->price,
+                     trade_quantity});
 
         incoming->quantity -= trade_quantity;
         resting->quantity -= trade_quantity;
@@ -116,8 +116,8 @@ public:
         total_trades++;
         total_volume += trade_quantity;
 
-        exec_q.push(
-            {resting->id, incoming->id, resting->price, trade_quantity});
+        exec_q.push({resting->trader_id, incoming->trader_id, resting->price,
+                     trade_quantity});
 
         incoming->quantity -= trade_quantity;
         resting->quantity -= trade_quantity;

@@ -35,6 +35,11 @@ int main() {
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
 
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  std::setvbuf(stderr, nullptr, _IONBF, 0);
+  std::cout << std::unitbuf;
+  std::cerr << std::unitbuf;
+
   // --- 1. Map the POSIX Shared Memory Segment ---
   constexpr size_t RING_SIZE = 65536;
   constexpr size_t INGRESS_RING_BYTES = RING_SIZE * sizeof(core::IngressPacket);
@@ -65,8 +70,8 @@ int main() {
   // expanded Go layout
   char *base_ptr = static_cast<char *>(shm_base);
 
-  // Prefixed Ingress Shared Memory Control Cursors to perfectly match Go naming
-  // schemes
+  // Prefixed Shared Memory Control Cursors mapping the exact Go binary
+  // blueprint
   auto *ingress_read_idx = reinterpret_cast<std::atomic<int64_t> *>(base_ptr);
   auto *ingress_write_idx =
       reinterpret_cast<std::atomic<int64_t> *>(base_ptr + 8);
@@ -75,7 +80,7 @@ int main() {
   auto *egress_write_idx =
       reinterpret_cast<std::atomic<int64_t> *>(base_ptr + 24);
 
-  // Array Base Starting Addresses with Ingress prefixes
+  // Array Base Starting Addresses positioned after the control block
   auto *ingress_ring_buffer =
       reinterpret_cast<core::IngressPacket *>(base_ptr + 32);
   auto *egress_ring_buffer = reinterpret_cast<core::EgressPacket *>(
@@ -98,7 +103,7 @@ int main() {
                            ingress_write_idx, ingress_ring_buffer]() {
     core::MatchingEngine engine(1000000);
 
-    // Sync our local consumer tracker with the shared memory
+    // Sync our local consumer tracker with the shared memory channel
     int64_t current_read = ingress_read_idx->load(std::memory_order_relaxed);
 
     // Step 2 Local Optimization: Thread-Local Telemetry Accumulators
@@ -124,9 +129,11 @@ int main() {
         uint32_t processed_trader = packet.trader_id;
         uint64_t processed_client_order_id = packet.client_order_id;
 
-        // Execute matching logic natively
+        // Execute matching logic natively and track the success state
+        bool order_accepted = false;
         if (packet.type == core::PacketType::NEW_ORDER) {
-          engine.submit_order(packet.side, packet.price, packet.quantity);
+          order_accepted = engine.submit_order(
+              packet.side, packet.price, packet.quantity, processed_trader);
         }
 
         // Stop the timing window IMMEDIATELY after execution
@@ -137,26 +144,69 @@ int main() {
         current_read++;
         ingress_read_idx->store(current_read, std::memory_order_release);
 
-        // --- Step 1: Populate and Push Outbound Execution Report ---
-        core::EgressPacket report_packet{};
-        report_packet.type = core::EgressType::ORDER_ACCEPTED;
-        report_packet.side = processed_side;
-        report_packet.instrument_id = processed_instrument;
-        report_packet.client_order_id = processed_client_order_id;
-        report_packet.maker_id =
-            processed_trader; // Map originating owner context to Maker profile
-        report_packet.taker_id =
-            processed_trader; // Map originating owner context to Taker profile
-        report_packet.match_price = packet.price;
-        report_packet.match_quantity = packet.quantity;
+        // --- Step 1: Egress Pipeline Generation with Strict Error Handling ---
+        if (!order_accepted) [[unlikely]] {
+          // Hard Reject Path: Object pool allocation failure detected
+          core::EgressPacket reject_packet{};
+          reject_packet.type = core::EgressType::ORDER_REJECTED;
+          reject_packet.side = processed_side;
+          reject_packet.instrument_id = processed_instrument;
+          reject_packet.client_order_id = processed_client_order_id;
+          reject_packet.maker_id = 0;
+          reject_packet.taker_id = 0;
+          reject_packet.match_price = packet.price;
+          reject_packet.match_quantity = packet.quantity;
 
-        if (!egress_queue->push(report_packet)) [[unlikely]] {
-          std::clog << "[Egress Alert] Execution report dropped due to SPSC "
-                       "saturation bounds."
-                    << "\n";
+          while (!egress_queue->push(reject_packet)) [[unlikely]] {
+            __builtin_ia32_pause();
+          }
+        } else {
+          // Order Ingested Successfully: Inspect internal book match states
+          const auto &execution_reports = engine.get_execution_queue();
+
+          if (execution_reports.size() == 0) {
+            // Passive Order Added: Send standard confirmation back to the
+            // single originator
+            core::EgressPacket report_packet{};
+            report_packet.type = core::EgressType::ORDER_ACCEPTED;
+            report_packet.side = processed_side;
+            report_packet.instrument_id = processed_instrument;
+            report_packet.client_order_id = processed_client_order_id;
+            report_packet.maker_id = processed_trader;
+            report_packet.taker_id = 0;
+            report_packet.match_price = packet.price;
+            report_packet.match_quantity = packet.quantity;
+
+            while (!egress_queue->push(report_packet)) [[unlikely]] {
+              __builtin_ia32_pause();
+            }
+          } else {
+            // Aggressive Order Triggered Matches: Emit true distinct
+            // counterparty fills
+            for (uint32_t i = 0; i < execution_reports.size(); ++i) {
+              const auto &trade = execution_reports[i];
+
+              core::EgressPacket fill_packet{};
+              fill_packet.type = core::EgressType::ORDER_FILLED;
+              fill_packet.side = processed_side;
+              fill_packet.instrument_id = processed_instrument;
+              fill_packet.client_order_id = processed_client_order_id;
+              fill_packet.maker_id = trade.maker_id;
+              fill_packet.taker_id = trade.taker_id;
+              fill_packet.match_price = trade.price;
+              fill_packet.match_quantity = trade.quantity;
+
+              while (!egress_queue->push(fill_packet)) [[unlikely]] {
+                __builtin_ia32_pause();
+              }
+            }
+          }
         }
 
-        // --- Step 2 Optimization: Macro-Batch Telemetry Verification Loop ---
+        // Always flush execution results for the next hot loop iteration pass
+        engine.clear_execution_queue();
+
+        // --- Step 2 Optimization: Macro-Batch Telemetry Re-Engaged ---
         rolling_cycles_sum += elapsed_cycles;
         iteration_counter++;
 
@@ -173,7 +223,6 @@ int main() {
             m_packet.type = core::MetricsUpdateType::ORDER_PROCESSED;
           }
 
-          // Compute average latency across the execution window block
           m_packet.latency_cycles = rolling_cycles_sum / BATCH_WINDOW;
           m_packet.total_orders = engine.get_total_orders();
           m_packet.total_trades = engine.get_total_trades();
@@ -182,15 +231,18 @@ int main() {
           m_packet.pool_peak = engine.get_pool_peak();
           m_packet.pool_capacity = pool_capacity;
 
+          // Non-blocking try-push to prevent telemetry drops from slowing the
+          // execution engine core
           metrics_queue->push(m_packet);
 
-          // Reset registers for the next macro block run
+          // Reset hardware registers for the next macro block run
           iteration_counter = 0;
           rolling_cycles_sum = 0;
         }
       } else {
         // Spin-wait optimization: Instructs CPU we are idling inside a
-        // spin-lock
+        // spin-lock Emits a pause instruction to prevent pipeline starvation
+        // and drop power draw
         __builtin_ia32_pause();
       }
     }
@@ -221,6 +273,8 @@ int main() {
         current_write++;
         egress_write_idx->store(current_write, std::memory_order_release);
       } else {
+        // Tight-spin fallback with a short yield loop to guarantee
+        // sub-microsecond handoffs
         std::this_thread::yield();
       }
     }
