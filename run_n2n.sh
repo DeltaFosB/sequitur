@@ -19,6 +19,9 @@ echo "[Phase 1/5] Executing Aggressive Infrastructure Environment Purge..."
 sudo pkill -15 sequitur_engine || true
 pkill -9 main || true
 
+# Bring down running telemetry system containers first to release file descriptors
+docker compose down 2>/dev/null || true
+
 # Force unlink active POSIX shared memory allocations and old telemetry routes
 sudo rm -f /dev/shm/sequitur_shm
 sudo rm -rf /dev/shm/sequitur
@@ -28,7 +31,7 @@ sudo mkdir -p /dev/shm/sequitur
 sudo touch /dev/shm/sequitur/telemetry.log
 sudo chmod 666 /dev/shm/sequitur/telemetry.log
 
-# Wipe legacy Vector fingerprint cache databases completely
+# Wipe legacy Vector fingerprint cache databases completely to prevent indexing offsets
 if [ -d "./.vector_data" ]; then
     echo "[-] Wiping out legacy Vector fingerprint cache databases..."
     sudo rm -rf ./.vector_data/*
@@ -42,7 +45,7 @@ echo "[OK] Binaries rebuilt."
 echo ""
 
 echo "[Phase 3/5] Verifying Telemetry Infrastructure..."
-# Boot up Loki, Grafana, and Vector simultaneously
+# Boot up Loki, Grafana, and Vector simultaneously with clean data volumes
 docker compose up -d
 echo "[-] Awaiting Grafana service stabilization..."
 while ! nc -z localhost 3000; do   
@@ -73,19 +76,9 @@ while [ ! -f /dev/shm/sequitur_shm ]; do
 done
 echo "[OK] Shared memory segment detected."
 
-# Spawn the RAM Protection Sentinel Loop in the background.
-(
-    while [ -f /dev/shm/sequitur/telemetry.log ]; do
-        FILE_SIZE=$(stat -c%s "/dev/shm/sequitur/telemetry.log" 2>/dev/null || echo 0)
-        # Short-circuit logic: No 'if', no 'then', no 'fi'
-        [ "$FILE_SIZE" -gt 10485760 ] && truncate -s 0 /dev/shm/sequitur/telemetry.log
-        sleep 1
-    done
-) &
-SENTINEL_PID=$!
-
 # Launch C++ Engine on isolated CPU Cores 3 and 4 with Real-Time FIFO priority
-sudo taskset -c 3,4 chrt -f 99 ./build/sequitur_engine >> /dev/shm/sequitur/telemetry.log 2>&1 &
+# Outputs stream straight to the volatile RAM disk log path
+sudo taskset -c 3,4 chrt -f 99 stdbuf -o0 -e0 ./build/sequitur_engine >> /dev/shm/sequitur/telemetry.log 2>&1 &
 ENGINE_PID=$!
 echo "[OK] C++ Engine core engaged on CPU Cores 3 and 4."
 echo ""
@@ -100,7 +93,6 @@ echo ""
 cleanup() {
     echo ""
     echo "[!] Termination sequence intercepted..."
-    kill -9 ${SENTINEL_PID} 2>/dev/null || true
     sudo pkill -9 ${ENGINE_PID} 2>/dev/null || true
     sudo pkill -9 sequitur_engine 2>/dev/null || true
     kill -9 ${GATEWAY_PID} 2>/dev/null || true
@@ -115,7 +107,7 @@ echo "[Phase 5/5] Injecting Continuous Market Traffic Simulation Loops..."
 # Execute the continuous traffic injection framework synchronously
 python3 client.py
 
-# FIXED: Prevent the script from exiting and destroying the Loki database
+# Prevent the script from exiting instantly and destroying the container contexts
 echo ""
 echo "======================================================================"
 echo " SIMULATION COMPLETE. DATA IS IN LOKI."
