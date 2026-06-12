@@ -17,6 +17,20 @@ type IngressPacket struct {
 	ClientOrderID uint64 // 8 Bytes
 }
 
+type EgressPacket struct {
+	Type           uint8    // Offset 0  | 1 Byte
+	Side           uint8    // Offset 1  | 1 Byte
+	Padding16      uint16   // Offset 2  | 2 Bytes
+	InstrumentID   uint32   // Offset 4  | 4 Bytes
+	ClientOrderID  uint64   // Offset 8  | 8 Bytes
+	MakerID        uint64   // Offset 16 | 8 Bytes
+	TakerID        uint64   // Offset 24 | 8 Bytes
+	MatchPrice     uint64   // Offset 32 | 8 Bytes
+	MatchQuantity  uint32   // Offset 40 | 4 Bytes
+	LeavesQuantity uint32   // Offset 44 | 4 Bytes
+	Padding        [16]byte // Offset 48 | 16 Bytes -> Ends at exactly 64 Bytes
+}
+
 func (packet *IngressPacket) assignField(counter int, val string) error {
 	switch counter {
 	case 0:
