@@ -56,12 +56,10 @@ echo ""
 
 echo "[Phase 4/5] Activating Go Gateway and Binding Real-Time C++ Engine..."
 cd gateway
-# Run gateway and background its execution instance
 go run main.go shm.go protocol.go &
 GATEWAY_PID=$!
 cd "${PROJECT_ROOT}"
 
-# CRITICAL: Wait for Go gateway to build the lock-free shared memory map
 echo "[-] Waiting for shared memory segment to be initialized by Gateway..."
 MAX_RETRIES=20
 COUNT=0
@@ -76,9 +74,9 @@ while [ ! -f /dev/shm/sequitur_shm ]; do
 done
 echo "[OK] Shared memory segment detected."
 
-# Launch C++ Engine on isolated CPU Cores 3 and 4 with Real-Time FIFO priority
-# Outputs stream straight to the volatile RAM disk log path
-sudo taskset -c 3,4 chrt -f 99 stdbuf -o0 -e0 ./build/sequitur_engine >> /dev/shm/sequitur/telemetry.log 2>&1 &
+# Core 2: Telemetry (Priority 50) | Core 3: Matching (Priority 99) | Core 4: Egress (Priority 99)
+sudo taskset -c 2,3,4 chrt -f 99 stdbuf -o0 -e0 ./build/sequitur_engine >> /dev/shm/sequitur/telemetry.log 2>&1 &
+
 ENGINE_PID=$!
 echo "[OK] C++ Engine core engaged on CPU Cores 3 and 4."
 echo ""
@@ -96,7 +94,6 @@ cleanup() {
     sudo pkill -9 ${ENGINE_PID} 2>/dev/null || true
     sudo pkill -9 sequitur_engine 2>/dev/null || true
     kill -9 ${GATEWAY_PID} 2>/dev/null || true
-    # Bring down telemetry system metrics containers
     docker compose down 2>/dev/null || true
     sudo rm -rf /dev/shm/sequitur
     echo "[OK] Pipelines offline."
@@ -104,10 +101,8 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[Phase 5/5] Injecting Continuous Market Traffic Simulation Loops..."
-# Execute the continuous traffic injection framework synchronously
 python3 client.py
 
-# Prevent the script from exiting instantly and destroying the container contexts
 echo ""
 echo "======================================================================"
 echo " SIMULATION COMPLETE. DATA IS IN LOKI."

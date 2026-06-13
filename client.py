@@ -6,10 +6,6 @@ import time
 
 
 def stream_market_traffic(host="127.0.0.1", port=8080, batch_size=1000):
-    """
-    Streams unique formatted CSV order packets down a persistent TCP socket
-    and tracks granular outbound versus inbound message states by transaction types.
-    """
     print(f"[Client] Initializing connection to Go Gateway at {host}:{port}...")
 
     try:
@@ -21,7 +17,6 @@ def stream_market_traffic(host="127.0.0.1", port=8080, batch_size=1000):
         print(f"[Client Fatal] Connection failed: {e}")
         sys.exit(1)
 
-    # Granular Message Audit States
     sent_count = 0
     accepted_count = 0
     filled_count = 0
@@ -52,15 +47,14 @@ def stream_market_traffic(host="127.0.0.1", port=8080, batch_size=1000):
                     if len(fields) != 6:
                         continue
 
-                    # Extract the EgressType field enum byte value (Field 0)
                     msg_type = int(fields[0])
 
                     with stats_lock:
-                        if msg_type == 1:  # EgressType::ORDER_ACCEPTED
+                        if msg_type == 1:
                             accepted_count += 1
-                        elif msg_type == 4:  # EgressType::ORDER_FILLED
+                        elif msg_type == 4:
                             filled_count += 1
-                        elif msg_type == 2:  # EgressType::ORDER_REJECTED
+                        elif msg_type == 2:
                             rejected_count += 1
 
         except Exception as e:
@@ -124,9 +118,6 @@ def stream_market_traffic(host="127.0.0.1", port=8080, batch_size=1000):
                 f"[Client Summary] Sustained Velocity    : {sent_count / duration:.2f} OPS"
             )
 
-        # Invariant Validation:
-        # 1. Every resting order generates 1 ACCEPTED frame.
-        # 2. Every crossing match sends 2 FILLED frames to this multiplexed socket (1 Maker, 1 Taker).
         with stats_lock:
             completed_trades = filled_count / 2
             processed_balance = accepted_count + completed_trades + rejected_count
@@ -135,8 +126,6 @@ def stream_market_traffic(host="127.0.0.1", port=8080, batch_size=1000):
             f"[Client Balance Audit] Total Settled Lifecycle States: {processed_balance:.1f}"
         )
 
-        # In an early exit (Ctrl+C), Sent Orders will be higher than Settled States
-        # because aggressive crossing orders are still sitting unmatched or trapped in transit buffers.
         if sent_count >= processed_balance:
             print(
                 f"[Client Invariant Check] SUCCESS: Platform stable. Open/In-Flight orders resting in book: {sent_count - processed_balance:.0f}"
