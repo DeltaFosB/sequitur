@@ -14,14 +14,12 @@
 #include <thread>
 #include <unistd.h>
 
-// Simple inline assembly helper to read raw hardware clock cycles
 inline uint64_t read_rdtsc() noexcept {
   unsigned int lo, hi;
   __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
   return ((uint64_t)hi << 32) | lo;
 }
 
-// Global flag to manage graceful shutdowns from run_pipeline.sh
 std::atomic<bool> engine_active{true};
 
 void signal_handler(int) {
@@ -31,7 +29,6 @@ void signal_handler(int) {
 int main() {
   using namespace sequitur;
 
-  // Register signal handlers for graceful teardown
   std::signal(SIGINT, signal_handler);
   std::signal(SIGTERM, signal_handler);
 
@@ -39,14 +36,12 @@ int main() {
   std::setvbuf(stderr, nullptr, _IONBF, 0);
   std::cout << std::unitbuf;
   std::cerr << std::unitbuf;
+  std::ios_base::sync_with_stdio(false);
 
   // --- 1. Map the POSIX Shared Memory Segment ---
   constexpr size_t RING_SIZE = 65536;
   constexpr size_t INGRESS_RING_BYTES = RING_SIZE * sizeof(core::IngressPacket);
   constexpr size_t EGRESS_RING_BYTES = RING_SIZE * sizeof(core::EgressPacket);
-
-  // Explicitly calculate layout geometry to match Go size invariants (6291488
-  // Bytes)
   constexpr size_t SHM_SIZE =
       8 + 8 + 8 + 8 + INGRESS_RING_BYTES + EGRESS_RING_BYTES;
 
@@ -66,12 +61,8 @@ int main() {
     return 1;
   }
 
-  // Cast memory offsets directly to hardware atomic pointers matching the
-  // expanded Go layout
   char *base_ptr = static_cast<char *>(shm_base);
 
-  // Prefixed Shared Memory Control Cursors mapping the exact Go binary
-  // blueprint
   auto *ingress_read_idx = reinterpret_cast<std::atomic<int64_t> *>(base_ptr);
   auto *ingress_write_idx =
       reinterpret_cast<std::atomic<int64_t> *>(base_ptr + 8);
@@ -80,7 +71,6 @@ int main() {
   auto *egress_write_idx =
       reinterpret_cast<std::atomic<int64_t> *>(base_ptr + 24);
 
-  // Array Base Starting Addresses positioned after the control block
   auto *ingress_ring_buffer =
       reinterpret_cast<core::IngressPacket *>(base_ptr + 32);
   auto *egress_ring_buffer = reinterpret_cast<core::EgressPacket *>(
@@ -92,7 +82,9 @@ int main() {
   auto egress_queue =
       std::make_shared<concurrency::SPSCQueue<core::EgressPacket, 8192>>();
 
-  utils::MetricsWorker worker(metrics_queue);
+  // PRESERVED ON HEAP: Prevents memory slicing when core thread dominates the
+  // CPU registers
+  auto worker = std::make_unique<utils::MetricsWorker>(metrics_queue);
 
   std::cout
       << "[System Initialized] Hooked to /dev/shm. Pipeline channels decoupled."
@@ -102,16 +94,12 @@ int main() {
   std::thread core_thread([metrics_queue, egress_queue, ingress_read_idx,
                            ingress_write_idx, ingress_ring_buffer]() {
     core::MatchingEngine engine(1000000);
-
-    // Sync our local consumer tracker with the shared memory channel
     int64_t current_read = ingress_read_idx->load(std::memory_order_relaxed);
 
-    // Step 2 Local Optimization: Thread-Local Telemetry Accumulators
-    constexpr uint64_t BATCH_WINDOW = 1024;
+    constexpr uint64_t BATCH_WINDOW = 64;
     uint64_t iteration_counter = 0;
     uint64_t rolling_cycles_sum = 0;
 
-    // The Ultimate Hot Loop
     while (engine_active.load(std::memory_order_relaxed)) {
       int64_t current_write =
           ingress_write_idx->load(std::memory_order_acquire);
@@ -119,41 +107,33 @@ int main() {
       if (current_read != current_write) {
         uint64_t start_cycles = read_rdtsc();
 
-        // Calculate bitwise slot offset and read the packet
         size_t slot = current_read & (RING_SIZE - 1);
         const core::IngressPacket &packet = ingress_ring_buffer[slot];
 
-        // Zero-copy local reference captures for execution processing
         uint8_t processed_side = packet.side;
         uint32_t processed_instrument = packet.instrument_id;
         uint32_t processed_trader = packet.trader_id;
         uint64_t processed_client_order_id = packet.client_order_id;
 
-        // Execute matching logic natively and track the success state
         bool order_accepted = false;
         if (packet.type == core::PacketType::NEW_ORDER) {
           order_accepted = engine.submit_order(
               packet.side, packet.price, packet.quantity, processed_trader);
         }
 
-        // Stop the timing window IMMEDIATELY after execution
         uint64_t end_cycles = read_rdtsc();
         uint64_t elapsed_cycles = end_cycles - start_cycles;
 
-        // Hardware memory release: Tell Go we finished reading this slot
         current_read++;
         ingress_read_idx->store(current_read, std::memory_order_release);
 
-        // --- Step 1: Egress Pipeline Generation with Strict Error Handling ---
+        // Zero-Drop Execution Processing Block
         if (!order_accepted) [[unlikely]] {
-          // Hard Reject Path: Object pool allocation failure detected
           core::EgressPacket reject_packet{};
           reject_packet.type = core::EgressType::ORDER_REJECTED;
           reject_packet.side = processed_side;
           reject_packet.instrument_id = processed_instrument;
           reject_packet.client_order_id = processed_client_order_id;
-          reject_packet.maker_id = 0;
-          reject_packet.taker_id = 0;
           reject_packet.match_price = packet.price;
           reject_packet.match_quantity = packet.quantity;
 
@@ -161,19 +141,15 @@ int main() {
             __builtin_ia32_pause();
           }
         } else {
-          // Order Ingested Successfully: Inspect internal book match states
           const auto &execution_reports = engine.get_execution_queue();
 
           if (execution_reports.size() == 0) {
-            // Passive Order Added: Send standard confirmation back to the
-            // single originator
             core::EgressPacket report_packet{};
             report_packet.type = core::EgressType::ORDER_ACCEPTED;
             report_packet.side = processed_side;
             report_packet.instrument_id = processed_instrument;
             report_packet.client_order_id = processed_client_order_id;
             report_packet.maker_id = processed_trader;
-            report_packet.taker_id = 0;
             report_packet.match_price = packet.price;
             report_packet.match_quantity = packet.quantity;
 
@@ -181,11 +157,8 @@ int main() {
               __builtin_ia32_pause();
             }
           } else {
-            // Aggressive Order Triggered Matches: Emit true distinct
-            // counterparty fills
             for (uint32_t i = 0; i < execution_reports.size(); ++i) {
               const auto &trade = execution_reports[i];
-
               core::EgressPacket fill_packet{};
               fill_packet.type = core::EgressType::ORDER_FILLED;
               fill_packet.side = processed_side;
@@ -202,11 +175,8 @@ int main() {
             }
           }
         }
-
-        // Always flush execution results for the next hot loop iteration pass
         engine.clear_execution_queue();
 
-        // --- Step 2 Optimization: Macro-Batch Telemetry Re-Engaged ---
         rolling_cycles_sum += elapsed_cycles;
         iteration_counter++;
 
@@ -231,18 +201,14 @@ int main() {
           m_packet.pool_peak = engine.get_pool_peak();
           m_packet.pool_capacity = pool_capacity;
 
-          // Non-blocking try-push to prevent telemetry drops from slowing the
-          // execution engine core
+          // SAFE-DROP METRICS: Protects the engine from stalling if worker is
+          // context-switched
           metrics_queue->push(m_packet);
 
-          // Reset hardware registers for the next macro block run
           iteration_counter = 0;
           rolling_cycles_sum = 0;
         }
       } else {
-        // Spin-wait optimization: Instructs CPU we are idling inside a
-        // spin-lock Emits a pause instruction to prevent pipeline starvation
-        // and drop power draw
         __builtin_ia32_pause();
       }
     }
@@ -259,7 +225,6 @@ int main() {
       if (egress_queue->pop(outbound_packet)) {
         int64_t current_read = egress_read_idx->load(std::memory_order_acquire);
 
-        // Enforce structural backpressure if Go gateway processing falls behind
         while ((current_write - current_read) >= 65536) [[unlikely]] {
           if (!engine_active.load(std::memory_order_relaxed))
             break;
@@ -273,14 +238,12 @@ int main() {
         current_write++;
         egress_write_idx->store(current_write, std::memory_order_release);
       } else {
-        // Tight-spin fallback with a short yield loop to guarantee
-        // sub-microsecond handoffs
         std::this_thread::yield();
       }
     }
   });
 
-  // --- 4. Keep Main Thread Alive to Allow Concurrency ---
+  // --- 4. Keep Main Thread Alive ---
   while (engine_active.load(std::memory_order_relaxed)) {
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
@@ -293,27 +256,19 @@ int main() {
   if (core_thread.joinable()) {
     core_thread.join();
   }
-
   if (egress_publisher_thread.joinable()) {
     egress_publisher_thread.join();
   }
 
-  if (!metrics_queue->empty()) {
-    std::cout << "[Teardown Diagnostic] Warning: SPSC Queue is shutting down "
-                 "with unprocessed telemetry items inside!"
-              << std::endl;
-  }
-  if (!egress_queue->empty()) {
-    std::cout << "[Teardown Diagnostic] Warning: Egress queue closing with "
-                 "residual execution reports trapped!"
-              << std::endl;
-  }
-
   munmap(shm_base, SHM_SIZE);
   close(shm_fd);
-  worker.shutdown();
+
+  worker->shutdown();
+  worker.reset(); // Destroy object explicitly
 
   std::cout << "[Shutdown Complete] Exited cleanly." << std::endl;
+  std::fflush(stdout);
+  std::fflush(stderr);
 
   return 0;
 }
